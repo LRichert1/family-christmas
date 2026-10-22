@@ -68,7 +68,7 @@ function parseShared(text) {
   if (!m) return null;
   const link = m[0].replace(/[.,;)]+$/, '');
   let name = text.replace(m[0], ' ').replace(/^\s*(check out|take a look at|look at|see)\b[^:]{0,40}:/i, '')
-    .replace(/^\s*(check out|take a look at|look at)\s+(this\s+|the\s+)?/i, '')
+    .replace(/^\s*(check\s+(this|it|that)\s+out|check\s+out|take a look at|look at)\s*(this\s+|the\s+)?[:,!.-]*\s*/i, '')
     .replace(/\b(at|on) amazon(\.com)?\b\.?/ig, '').replace(/\s+/g, ' ').replace(/^[\s:–—-]+|[\s:–—-]+$/g, '');
   if (!name) {
     const s = /amazon\.[a-z.]+\/([^/?#]+)\/(?:dp|gp\/product)\//i.exec(link);
