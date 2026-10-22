@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Family Christmas Lists</title>
+<style>
+:root{--red:#b3262e;--green:#1f6b4a;--bg:#faf6f0;--card:#fff;--ink:#2a2420;--mute:#7a6f66;--line:#e8dfd3}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--red);color:#fff;padding:14px 16px;display:flex;justify-content:space-between;align-items:center}
+header h1{margin:0;font-size:1.15rem}
+header button{background:transparent;color:#fff;border:1px solid #fff8;border-radius:8px;padding:6px 10px;cursor:pointer}
+main{max-width:720px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+h2{margin:0 0 10px;font-size:1.1rem}
+input,button.primary{font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);width:100%;margin-bottom:8px}
+button.primary{background:var(--green);color:#fff;border:0;cursor:pointer}
+button.small{font:inherit;font-size:.85rem;padding:4px 10px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer}
+button.small.on{background:var(--green);color:#fff;border-color:var(--green)}
+button.del{color:var(--red)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.tabs button{border:1px solid var(--line);background:#fff;border-radius:20px;padding:6px 14px;cursor:pointer;font:inherit}
+.tabs button.active{background:var(--green);color:#fff;border-color:var(--green)}
+.item{padding:10px 0;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:space-between;align-items:flex-start}
+.item:first-of-type{border-top:0}
+.meta{color:var(--mute);font-size:.88rem}
+.item.claimed .t{text-decoration:line-through;color:var(--mute)}
+.tag{font-size:.8rem;color:var(--green);font-weight:600}
+.err{color:var(--red);min-height:1.2em;font-size:.9rem}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+a{color:var(--green)}
+.empty{color:var(--mute);font-style:italic}
+</style>
+</head>
+<body>
+<header><h1>🎄 Family Christmas Lists</h1><button id="out" hidden>Sign out</button></header>
+<main id="app"></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const db = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY);
+let state = null, view = 'mine', editing = null;
+
+const emailFor = (name) => name.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '') + '@family.local';
+
+async function load() {
+  const { data: { session } } = await db.auth.getSession();
+  if (!session) return renderLogin();
+  const me = session.user.id;
+  const [p, i, c] = await Promise.all([
+    db.from('profiles').select('*').order('display_name'),
+    db.from('items').select('*').order('created_at'),
+    db.from('claims').select('*'),
+  ]);
+  const err = p.error || i.error || c.error;
+  if (err) return alert(err.message);
+  const names = Object.fromEntries(p.data.map((x) => [x.id, x.display_name]));
+  const claimOf = Object.fromEntries(c.data.map((x) => [x.item_id, x.claimed_by]));
+  state = {
+    me,
+    people: p.data.map((u) => ({
+      id: u.id, name: u.display_name,
+      items: i.data.filter((x) => x.owner === u.id).map((x) => ({
+        ...x,
+        claimedBy: claimOf[x.id] ? names[claimOf[x.id]] : null,
+        claimedByMe: claimOf[x.id] === me,
+      })),
+    })),
+  };
+  renderApp();
+}
+
+function renderLogin(msg = '') {
+  $('#out').hidden = true;
+  $('#app').innerHTML = `<div class="card"><h2>Sign in</h2>
+    <p class="meta">Use your username and PIN. First time? Fill in the family code and press Create account.</p>
+    <input id="u" placeholder="Username (e.g. Grandma)" autocomplete="username">
+    <input id="p" type="password" placeholder="PIN (6+ characters)" autocomplete="current-password">
+    <input id="f" placeholder="Family code (new accounts only)">
+    <div class="err" id="e">${esc(msg)}</div>
+    <button class="primary" id="go">Sign in</button>
+    <button class="primary" id="new" style="background:var(--red)">Create account</button></div>`;
+  const run = async (create) => {
+    const name = $('#u').value.trim(), pin = $('#p').value;
+    if (!emailFor(name).replace('@family.local', '')) return ($('#e').textContent = 'Enter a username (letters and numbers).');
+    if (pin.length < 6) return ($('#e').textContent = 'PIN must be at least 6 characters.');
+    const email = emailFor(name);
+    const r = create
+      ? await db.auth.signUp({ email, password: pin, options: { data: { display_name: name, family_code: $('#f').value.trim() } } })
+      : await db.auth.signInWithPassword({ email, password: pin });
+    if (r.error) {
+      const m = r.error.message;
+      return ($('#e').textContent = /database error/i.test(m) ? 'Wrong family code, or that username is taken.'
+        : /invalid login/i.test(m) ? 'Wrong username or PIN.' : /already/i.test(m) ? 'That username is taken.' : m);
+    }
+    view = 'mine'; load();
+  };
+  $('#go').onclick = () => run(false);
+  $('#new').onclick = () => run(true);
+  $('#app').onkeydown = (e) => e.key === 'Enter' && run(false);
+}
+
+function renderApp() {
+  $('#out').hidden = false;
+  const others = state.people.filter((p) => p.id !== state.me);
+  if (view !== 'mine' && !others.find((p) => p.id === view)) view = 'mine';
+  const tabs = `<div class="tabs"><button class="${view === 'mine' ? 'active' : ''}" data-v="mine">My list</button>` +
+    others.map((p) => `<button class="${view === p.id ? 'active' : ''}" data-v="${esc(p.id)}">${esc(p.name)}</button>`).join('') + `</div>`;
+  $('#app').innerHTML = tabs + (view === 'mine' ? mine() : theirs(others.find((p) => p.id === view)));
+  document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => { view = b.dataset.v; editing = null; renderApp(); });
+  wire();
+}
+
+function link(i) { return i.link ? ` · <a href="${esc(/^https?:\/\//.test(i.link) ? i.link : 'https://' + i.link)}" target="_blank" rel="noopener">link</a>` : ''; }
+function meta(i) { return [i.price && '$' + esc(i.price.replace(/^\$/, '')), i.notes && esc(i.notes)].filter(Boolean).join(' · ') + link(i); }
+
+function mine() {
+  const me = state.people.find((p) => p.id === state.me);
+  const form = (i = {}) => `<input id="n" placeholder="What do you want?" value="${esc(i.name)}">
+    <div class="row"><input id="pr" placeholder="Price (optional)" value="${esc(i.price)}"><input id="l" placeholder="Link (optional)" value="${esc(i.link)}"></div>
+    <input id="no" placeholder="Notes: size, color… (optional)" value="${esc(i.notes)}">`;
+  const items = me.items.map((i) => editing === i.id
+    ? `<div class="item"><div style="width:100%">${form(i)}<button class="primary" data-save="${i.id}">Save</button> <button class="small" data-cancel>Cancel</button></div></div>`
+    : `<div class="item"><div><div class="t">${esc(i.name)}</div><div class="meta">${meta(i)}</div></div>
+       <div><button class="small" data-edit="${i.id}">Edit</button> <button class="small del" data-del="${i.id}">✕</button></div></div>`).join('');
+  return `${editing ? '' : `<div class="card"><h2>Add to my list</h2>${form()}<button class="primary" id="add">Add item</button></div>`}
+    <div class="card"><h2>My list</h2>${items || '<div class="empty">Nothing yet — add something above!</div>'}
+    <p class="meta">🤫 You can't see what others plan to buy for you.</p></div>`;
+}
+
+function theirs(p) {
+  const items = p.items.map((i) => {
+    const mineClaim = i.claimedByMe, other = i.claimedBy && !mineClaim;
+    return `<div class="item ${i.claimedBy ? 'claimed' : ''}"><div><div class="t">${esc(i.name)}</div><div class="meta">${meta(i)}</div>
+      ${i.claimedBy ? `<div class="tag">${mineClaim ? "You're buying this" : esc(i.claimedBy) + ' is buying this'}</div>` : ''}</div>
+      ${other ? '' : `<button class="small ${mineClaim ? 'on' : ''}" data-claim="${i.id}" data-mine="${mineClaim ? 1 : ''}">${mineClaim ? 'Unclaim' : "I'll buy this"}</button>`}</div>`;
+  }).join('');
+  return `<div class="card"><h2>${esc(p.name)}'s list</h2>${items || `<div class="empty">${esc(p.name)} hasn't added anything yet.</div>`}</div>`;
+}
+
+function wire() {
+  const act = async (fn) => { const r = await fn(); if (r && r.error) alert(/duplicate/.test(r.error.message) ? 'Someone just claimed that.' : r.error.message); await load(); };
+  const fields = () => ({ name: $('#n').value.trim(), price: $('#pr').value.trim(), link: $('#l').value.trim(), notes: $('#no').value.trim() });
+  const a = $('#add');
+  if (a) a.onclick = () => { const f = fields(); if (!f.name) return alert('Enter an item name.'); act(() => db.from('items').insert({ ...f, owner: state.me })); };
+  document.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirm('Remove this item?') && act(() => db.from('items').delete().eq('id', b.dataset.del)));
+  document.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => { editing = b.dataset.edit; renderApp(); });
+  document.querySelectorAll('[data-cancel]').forEach((b) => b.onclick = () => { editing = null; renderApp(); });
+  document.querySelectorAll('[data-save]').forEach((b) => b.onclick = () => { const f = fields(); if (!f.name) return alert('Enter an item name.'); editing = null; act(() => db.from('items').update(f).eq('id', b.dataset.save)); });
+  document.querySelectorAll('[data-claim]').forEach((b) => b.onclick = () => act(() => b.dataset.mine
+    ? db.from('claims').delete().eq('item_id', b.dataset.claim)
+    : db.from('claims').insert({ item_id: b.dataset.claim, claimed_by: state.me })));
+}
+
+$('#out').onclick = async () => { await db.auth.signOut(); state = null; renderLogin(); };
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state && !editing) load(); });
+load();
+</script>
+</body>
+</html>
