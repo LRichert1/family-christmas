@@ -208,7 +208,8 @@ function mine() {
   prefill = null;
   return `${editing ? '' : `<div class="card"><h2>Add to my list</h2>${prefill === null && start.link ? '<div class="tag" style="margin-bottom:8px">✅ Product added from your share. Check it and press Add item.</div>' : ''}${form(start)}<button class="primary" id="add">Add item</button></div>`}
     <div class="card"><h2>My list</h2>${items || '<div class="empty">Nothing yet — add something above!</div>'}
-    <p class="meta">🤫 You can't see what others plan to buy for you.</p></div>`;
+    <p class="meta">🤫 You can't see what others plan to buy for you.</p>
+    ${me.items.length ? '<button class="small del" id="clearall">Clear my whole list (new year)</button>' : ''}</div>`;
 }
 
 function theirs(p) {
@@ -287,6 +288,17 @@ function wire() {
   document.querySelectorAll('[data-claim]').forEach((b) => b.onclick = () => act(() => b.dataset.mine
     ? db.from('claims').delete().eq('item_id', b.dataset.claim)
     : db.from('claims').insert({ item_id: b.dataset.claim, claimed_by: state.me })));
+  const ca = $('#clearall');
+  if (ca) ca.onclick = () => {
+    const mineItems = state.people.find((p) => p.id === state.me).items;
+    if (!confirm(`Remove all ${mineItems.length} items from your list? This can't be undone, and anyone who marked an item as bought loses that note.`)) return;
+    act(async () => {
+      const r = await db.from('items').delete().eq('owner', state.me);
+      const paths = mineItems.map((i) => i.image_path).filter(Boolean);
+      if (!r.error && paths.length) await db.storage.from('item-images').remove(paths);
+      return r;
+    });
+  };
   const sb = $('#savebud');
   if (sb) sb.onclick = () => { const v = $('#bud').value; act(() => v === ''
     ? db.from('budgets').delete().eq('owner', state.me)
