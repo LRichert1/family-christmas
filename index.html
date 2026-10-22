@@ -60,7 +60,27 @@ label.file input{padding:6px}
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const db = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY);
-let state = null, view = 'mine', editing = null;
+let state = null, view = 'mine', editing = null, prefill = null;
+
+// Pull a product link (and a name, if there is one) out of whatever Amazon or a browser shared.
+function parseShared(text) {
+  const m = /https?:\/\/[^\s<>"']+/i.exec(text || '');
+  if (!m) return null;
+  const link = m[0].replace(/[.,;)]+$/, '');
+  let name = text.replace(m[0], ' ').replace(/^\s*(check out|take a look at|look at|see)\b[^:]{0,40}:/i, '')
+    .replace(/^\s*(check out|take a look at|look at)\s+(this\s+|the\s+)?/i, '')
+    .replace(/\b(at|on) amazon(\.com)?\b\.?/ig, '').replace(/\s+/g, ' ').replace(/^[\s:–—-]+|[\s:–—-]+$/g, '');
+  if (!name) {
+    const s = /amazon\.[a-z.]+\/([^/?#]+)\/(?:dp|gp\/product)\//i.exec(link);
+    if (s) name = decodeURIComponent(s[1]).replace(/-/g, ' ');
+  }
+  return { link, name: name.slice(0, 120) };
+}
+(() => {
+  const q = new URLSearchParams(location.search);
+  const p = parseShared([q.get('title'), q.get('text'), q.get('url')].filter(Boolean).join(' '));
+  if (p) { prefill = p; history.replaceState(null, '', location.pathname); }
+})();
 
 const PRI = { 1: '⭐ Must-have', 2: '🙂 Would like', 3: '💭 Maybe' };
 const emailFor = (name) => name.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '') + '@family.local';
@@ -106,6 +126,7 @@ async function load() {
   ]);
   const err = p.error || i.error || c.error || b.error;
   if (err) return alert(err.message);
+  if (!p.data.some((u) => u.id === me)) { await db.auth.signOut(); return renderLogin('Please sign in again.'); }
   const names = Object.fromEntries(p.data.map((x) => [x.id, x.display_name]));
   const claimOf = Object.fromEntries(c.data.map((x) => [x.item_id, x.claimed_by]));
   state = {
@@ -150,7 +171,7 @@ function renderLogin(msg = '') {
   };
   $('#go').onclick = () => run(false);
   $('#new').onclick = () => run(true);
-  $('#app').onkeydown = (e) => e.key === 'Enter' && run(false);
+  $('#app').onkeydown = (e) => { if (e.key === 'Enter') run(false); };
 }
 
 function renderApp() {
@@ -175,14 +196,17 @@ function mine() {
   const me = state.people.find((p) => p.id === state.me);
   const form = (i = {}) => `<input id="n" placeholder="What do you want?" value="${esc(i.name)}">
     <select id="pri">${[1, 2, 3].map((k) => `<option value="${k}" ${(i.priority || 2) === k ? 'selected' : ''}>${PRI[k]}</option>`).join('')}</select>
-    <div class="linkrow"><input id="l" placeholder="Product link (optional)" value="${esc(i.link)}"><button class="small" type="button" id="amz">Search Amazon</button></div>
+    <div class="linkrow"><input id="l" placeholder="Product link (optional)" value="${esc(i.link)}"><button class="small" type="button" id="pst">📋 Paste</button><button class="small" type="button" id="amz">Search Amazon</button></div>
+    ${i.id ? '' : '<div class="meta" style="margin:-2px 0 8px">Found it in Amazon? Tap Share → Copy, come back here and tap Paste. It fills in the name and link.</div>'}
     <div class="row"><input id="pr" placeholder="Price (optional)" value="${esc(i.price)}"><input id="no" placeholder="Size, color… (optional)" value="${esc(i.notes)}"></div>
     <label class="file">📷 Photo ${i.image_path ? '(choose a new one to replace)' : '(optional)'}<input id="ph" type="file" accept="image/*"></label>`;
   const items = me.items.map((i) => editing === i.id
     ? `<div class="item"><div style="width:100%">${form(i)}<button class="primary" data-save="${i.id}">Save</button> <button class="small" data-cancel>Cancel</button></div></div>`
     : `<div class="item"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div></div></div>
        <div class="btns">${buy(i)}<span><button class="small" data-edit="${i.id}">Edit</button> <button class="small del" data-del="${i.id}">✕</button></span></div></div>`).join('');
-  return `${editing ? '' : `<div class="card"><h2>Add to my list</h2>${form()}<button class="primary" id="add">Add item</button></div>`}
+  const start = prefill ? { name: prefill.name, link: prefill.link } : {};
+  prefill = null;
+  return `${editing ? '' : `<div class="card"><h2>Add to my list</h2>${prefill === null && start.link ? '<div class="tag" style="margin-bottom:8px">✅ Product added from your share. Check it and press Add item.</div>' : ''}${form(start)}<button class="primary" id="add">Add item</button></div>`}
     <div class="card"><h2>My list</h2>${items || '<div class="empty">Nothing yet — add something above!</div>'}
     <p class="meta">🤫 You can't see what others plan to buy for you.</p></div>`;
 }
@@ -225,6 +249,23 @@ function wire() {
   const a = $('#add');
   if (a) a.onclick = () => { const f = fields(); if (!f.name) return alert('Enter an item name.'); a.disabled = true;
     act(async () => { const file = photo(); if (file) f.image_path = await uploadPhoto(file); return db.from('items').insert({ ...f, owner: state.me }); }); };
+  const fillFrom = (text) => {
+    const p = parseShared(text);
+    if (!p) return false;
+    $('#l').value = p.link;
+    if (!$('#n').value.trim() && p.name) $('#n').value = p.name;
+    return true;
+  };
+  const lf = $('#l');
+  if (lf) lf.addEventListener('paste', (e) => {
+    const t = (e.clipboardData || window.clipboardData).getData('text');
+    if (fillFrom(t)) e.preventDefault();
+  });
+  const pst = $('#pst');
+  if (pst) pst.onclick = async () => {
+    try { if (!fillFrom(await navigator.clipboard.readText())) alert('No link found on your clipboard. Copy the product link first.'); }
+    catch { alert('Could not read your clipboard. Long-press the link box and choose Paste instead.'); }
+  };
   const amz = $('#amz');
   if (amz) amz.onclick = () => { const q = $('#n').value.trim(); if (!q) return alert('Type what you want first, then search.'); window.open('https://www.amazon.com/s?k=' + encodeURIComponent(q), '_blank', 'noopener'); };
   document.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirm('Remove this item?') && act(async () => {
