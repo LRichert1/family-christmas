@@ -55,6 +55,7 @@ label.file input{padding:6px}
 .item.done{opacity:.55}
 details summary{cursor:pointer;margin-bottom:8px}
 .about div{margin:2px 0;font-size:.95rem}
+.famname{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);margin:4px 0 6px}
 .over{color:var(--red)}
 .under{color:var(--green)}
 </style>
@@ -129,28 +130,33 @@ async function load() {
   const { data: { session } } = await db.auth.getSession();
   if (!session) return renderLogin();
   const me = session.user.id;
-  const [p, i, c, b] = await Promise.all([
+  const [p, i, c, b, f, m] = await Promise.all([
     db.from('profiles').select('*').order('display_name'),
     db.from('items').select('*').order('priority').order('created_at'),
     db.from('claims').select('*'),
     db.from('budgets').select('*').maybeSingle(),
+    db.from('families').select('id,name').order('name'),
+    db.from('memberships').select('*'),
   ]);
-  const err = p.error || i.error || c.error || b.error;
+  const err = p.error || i.error || c.error || b.error || f.error || m.error;
   if (err) return alert(err.message);
   if (!p.data.some((u) => u.id === me)) { await db.auth.signOut(); return renderLogin('Please sign in again.'); }
   const names = Object.fromEntries(p.data.map((x) => [x.id, x.display_name]));
   const claimsBy = {};
   c.data.forEach((x) => (claimsBy[x.item_id] = claimsBy[x.item_id] || []).push(x));
+  const famsOf = {};
+  m.data.forEach((x) => (famsOf[x.user_id] = famsOf[x.user_id] || []).push(x.family_id));
   state = {
     me,
     budget: b.data ? Number(b.data.amount) : null,
+    families: f.data,
     people: p.data.map((u) => ({
-      id: u.id, name: u.display_name, info: u,
+      id: u.id, name: u.display_name, info: u, famIds: famsOf[u.id] || [],
       items: i.data.filter((x) => x.owner === u.id).map((x) => {
         const cl = claimsBy[x.id] || [];
         return {
           ...x,
-          claimers: cl.map((k) => ({ name: names[k.claimed_by], mine: k.claimed_by === me })),
+          claimers: cl.map((k) => ({ name: names[k.claimed_by] || 'Someone', mine: k.claimed_by === me })),
           myClaim: cl.find((k) => k.claimed_by === me) || null,
           isGroup: cl.length > 0 && cl.every((k) => k.is_group),
         };
@@ -195,7 +201,11 @@ function renderApp() {
   const others = state.people.filter((p) => p.id !== state.me);
   if (view !== 'mine' && view !== 'shop' && !others.find((p) => p.id === view)) view = 'mine';
   const tab = (v, label) => `<button class="${view === v ? 'active' : ''}" data-v="${esc(v)}">${label}</button>`;
-  const tabs = `<div class="tabs">${tab('mine', 'My list')}${tab('shop', '🛍 Shopping')}${others.map((p) => tab(p.id, esc(p.name))).join('')}</div>`;
+  const mineRow = `<div class="tabs">${tab('mine', 'My list')}${tab('shop', '🛍 Shopping')}</div>`;
+  const people = state.families.length > 1
+    ? state.families.map((f) => `<div class="famname">${esc(f.name)}</div><div class="tabs">${others.filter((p) => p.famIds.includes(f.id)).map((p) => tab(p.id, esc(p.name))).join('') || '<span class="meta">No one else here yet</span>'}</div>`).join('')
+    : `<div class="tabs">${others.map((p) => tab(p.id, esc(p.name))).join('')}</div>`;
+  const tabs = mineRow + people;
   $('#app').innerHTML = tabs + (view === 'mine' ? mine() : view === 'shop' ? shopping() : theirs(others.find((p) => p.id === view)));
   document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => { view = b.dataset.v; editing = null; renderApp(); });
   wire();
@@ -226,7 +236,11 @@ function mine() {
     ${editing ? '' : aboutForm(me)}
     <div class="card"><h2>My list</h2>${me.items.length ? controls(false) : ''}${items || `<div class="empty">${me.items.length ? 'No items match this filter.' : 'Nothing yet — add something above!'}</div>`}
     <p class="meta">🤫 You can't see what others plan to buy for you.</p>
-    ${me.items.length ? '<button class="small del" id="clearall">Clear my whole list (new year)</button>' : ''}</div>`;
+    ${me.items.length ? '<button class="small del" id="clearall">Clear my whole list (new year)</button>' : ''}</div>
+    <div class="card"><h2>My families</h2>
+    <div class="meta" style="margin-bottom:8px">${state.families.map((f) => esc(f.name)).join(' · ') || 'None yet'}</div>
+    <div class="linkrow"><input id="famcode" placeholder="Code for another family"><button class="small" id="joinfam">Join</button></div>
+    <div class="meta">Join a second family to see everyone on both sides. They'll be able to see your list too.</div></div>`;
 }
 
 // Sort and filter a list of items.
@@ -374,6 +388,16 @@ function wire() {
   if ($('#sort')) $('#sort').onchange = (e) => { sortBy = e.target.value; rerender(); };
   if ($('#fpri')) $('#fpri').onchange = (e) => { filterPri = +e.target.value; rerender(); };
   if ($('#hidetaken')) $('#hidetaken').onchange = (e) => { hideTaken = e.target.checked; rerender(); };
+  const jf = $('#joinfam');
+  if (jf) jf.onclick = () => {
+    const code = $('#famcode').value.trim();
+    if (!code) return alert('Enter the family code first.');
+    act(async () => {
+      const r = await db.rpc('join_family', { p_code: code });
+      if (!r.error) alert(`Joined ${r.data}!`);
+      return r;
+    });
+  };
   const si = $('#saveinfo');
   if (si) si.onclick = () => act(async () => {
     const f = {};
