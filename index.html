@@ -159,6 +159,7 @@ async function load() {
           claimers: cl.map((k) => ({ name: names[k.claimed_by] || 'Someone', mine: k.claimed_by === me })),
           myClaim: cl.find((k) => k.claimed_by === me) || null,
           isGroup: cl.length > 0 && cl.every((k) => k.is_group),
+          groupFamily: (cl.find((k) => k.is_group) || {}).group_family || null,
         };
       }),
     })),
@@ -274,25 +275,32 @@ function aboutForm(me) {
 }
 
 // The claim status line and buttons for one item on someone else's list.
-function claimUI(i) {
+function claimUI(i, owner) {
   const n = i.claimers.length, mine = !!i.myClaim, who = i.claimers.slice().sort((a, b) => b.mine - a.mine).map((c) => (c.mine ? 'You' : esc(c.name)));
   const each = num(i.price) && n > 1 ? ` · about ${money(num(i.price) / n)} each` : '';
-  if (!n) return { tag: '', btns: `<button class="small" data-claim="${i.id}">I'll buy this</button><button class="small" data-claim="${i.id}" data-group="1">👥 Group gift</button>` };
+  // a group gift is open to one family: any family I belong to that the list's owner also belongs to
+  const groupFams = state.families.filter((f) => owner.famIds.includes(f.id));
+  const groupBtns = (attr) => groupFams.map((f) => `<button class="small" data-${attr}="${i.id}" data-fam="${f.id}">👥 ${groupFams.length > 1 ? `Group gift: ${esc(f.name)}` : 'Group gift'}</button>`).join('');
+  if (!n) return { tag: '', btns: `<button class="small" data-claim="${i.id}">I'll buy this</button>${groupBtns('claim')}` };
   if (i.isGroup) {
-    const tag = n === 1 ? `👥 ${who[0]} started a group gift. Others can chip in` : `👥 ${who.join(', ')} are chipping in${each}`;
+    const fam = state.families.find((f) => f.id === i.groupFamily);
+    const famNote = fam ? ` for ${esc(fam.name)}` : '';
+    const canJoin = !!fam;
+    const tag = !canJoin ? `👥 Group gift for another family (closed to you)`
+      : n === 1 ? `👥 ${who[0]} started a group gift${famNote}. Others in that family can chip in` : `👥 ${who.join(', ')} are chipping in${each}`;
     const btns = mine
       ? `<button class="small on" data-unclaim="${i.id}">Leave</button>${n === 1 ? `<button class="small" data-solo="${i.id}">Buy solo</button>` : ''}`
-      : `<button class="small" data-claim="${i.id}" data-group="1">Chip in</button>`;
+      : canJoin ? `<button class="small" data-claim="${i.id}" data-fam="${i.groupFamily}" data-join="1">Chip in</button>` : '';
     return { tag, btns };
   }
   return mine
-    ? { tag: "You're buying this", btns: `<button class="small on" data-unclaim="${i.id}">Unclaim</button><button class="small" data-open="${i.id}">👥 Open to group</button>` }
+    ? { tag: "You're buying this", btns: `<button class="small on" data-unclaim="${i.id}">Unclaim</button>${groupBtns('open').replace(/Group gift/g, 'Open to group')}` }
     : { tag: `${who[0]} is buying this`, btns: '' };
 }
 
 function theirs(p) {
   const items = tidy(p.items, true).map((i) => {
-    const ui = claimUI(i);
+    const ui = claimUI(i, p);
     return `<div class="item ${i.claimers.length && !i.isGroup ? 'claimed' : ''}"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div>
       ${ui.tag ? `<div class="tag">${ui.tag}</div>` : ''}</div></div>
       <div class="btns">${buy(i)}${ui.btns}</div></div>`;
@@ -375,11 +383,11 @@ function wire() {
       return db.from('items').update(f).eq('id', b.dataset.save);
     }); });
   document.querySelectorAll('[data-claim]').forEach((b) => b.onclick = () =>
-    act(() => db.from('claims').insert({ item_id: b.dataset.claim, claimed_by: state.me, is_group: !!b.dataset.group })));
+    act(() => db.from('claims').insert({ item_id: b.dataset.claim, claimed_by: state.me, is_group: !!b.dataset.fam, group_family: b.dataset.fam || null })));
   document.querySelectorAll('[data-unclaim]').forEach((b) => b.onclick = () =>
     act(() => db.from('claims').delete().eq('item_id', b.dataset.unclaim).eq('claimed_by', state.me)));
-  const setGroup = (attr, val) => document.querySelectorAll(`[data-${attr}]`).forEach((b) => b.onclick = () =>
-    act(() => db.from('claims').update({ is_group: val }).eq('item_id', b.dataset[attr]).eq('claimed_by', state.me)));
+  const setGroup = (attr, group) => document.querySelectorAll(`[data-${attr}]`).forEach((b) => b.onclick = () =>
+    act(() => db.from('claims').update({ is_group: group, group_family: group ? b.dataset.fam : null }).eq('item_id', b.dataset[attr]).eq('claimed_by', state.me)));
   setGroup('open', true);
   setGroup('solo', false);
   document.querySelectorAll('[data-bought]').forEach((b) => b.onchange = () =>
