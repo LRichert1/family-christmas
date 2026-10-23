@@ -48,6 +48,13 @@ label.file{font-size:.85rem;color:var(--mute);display:block;margin-bottom:8px}
 label.file input{padding:6px}
 .empty{color:var(--mute);font-style:italic}
 .total{font-weight:700;font-size:1.05rem;display:flex;justify-content:space-between;margin-top:10px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.controls select{width:auto;margin:0;padding:6px 8px;font-size:.88rem}
+.chk{font-size:.9rem;display:flex;align-items:center;gap:6px}
+.chk input{width:auto;margin:0}
+.item.done{opacity:.55}
+details summary{cursor:pointer;margin-bottom:8px}
+.about div{margin:2px 0;font-size:.95rem}
 .over{color:var(--red)}
 .under{color:var(--green)}
 </style>
@@ -62,6 +69,9 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const db = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY);
 let state = null, view = 'mine', editing = null, prefill = null;
+let sortBy = 'pri', filterPri = 0, hideTaken = false;
+const INFO = [['shirt_size', '👕 Shirt', 'e.g. Large'], ['pants_size', '👖 Pants', 'e.g. Large'], ['jeans_size', '👖 Jeans', 'e.g. 32x34'],
+  ['shoe_size', '👟 Shoe', 'e.g. 10.5'], ['jewelry_color', '💍 Jewelry color', 'e.g. Gold, silver, rose gold'], ['interests', '⭐ Interests', 'Sports teams, shows, characters…']];
 
 // Pull a product link (and a name, if there is one) out of whatever Amazon or a browser shared.
 function parseShared(text) {
@@ -129,17 +139,22 @@ async function load() {
   if (err) return alert(err.message);
   if (!p.data.some((u) => u.id === me)) { await db.auth.signOut(); return renderLogin('Please sign in again.'); }
   const names = Object.fromEntries(p.data.map((x) => [x.id, x.display_name]));
-  const claimOf = Object.fromEntries(c.data.map((x) => [x.item_id, x.claimed_by]));
+  const claimsBy = {};
+  c.data.forEach((x) => (claimsBy[x.item_id] = claimsBy[x.item_id] || []).push(x));
   state = {
     me,
     budget: b.data ? Number(b.data.amount) : null,
     people: p.data.map((u) => ({
-      id: u.id, name: u.display_name,
-      items: i.data.filter((x) => x.owner === u.id).map((x) => ({
-        ...x,
-        claimedBy: claimOf[x.id] ? names[claimOf[x.id]] : null,
-        claimedByMe: claimOf[x.id] === me,
-      })),
+      id: u.id, name: u.display_name, info: u,
+      items: i.data.filter((x) => x.owner === u.id).map((x) => {
+        const cl = claimsBy[x.id] || [];
+        return {
+          ...x,
+          claimers: cl.map((k) => ({ name: names[k.claimed_by], mine: k.claimed_by === me })),
+          myClaim: cl.find((k) => k.claimed_by === me) || null,
+          isGroup: cl.length > 0 && cl.every((k) => k.is_group),
+        };
+      }),
     })),
   };
   renderApp();
@@ -201,39 +216,98 @@ function mine() {
     ${i.id ? '' : '<div class="meta" style="margin:-2px 0 8px">Found it in Amazon? Tap Share → Copy, come back here and tap Paste. It fills in the name and link.</div>'}
     <div class="row"><input id="pr" placeholder="Price (optional)" value="${esc(i.price)}"><input id="no" placeholder="Size, color… (optional)" value="${esc(i.notes)}"></div>
     <label class="file">📷 Photo ${i.image_path ? '(choose a new one to replace)' : '(optional)'}<input id="ph" type="file" accept="image/*"></label>`;
-  const items = me.items.map((i) => editing === i.id
+  const items = tidy(me.items, false).map((i) => editing === i.id
     ? `<div class="item"><div style="width:100%">${form(i)}<button class="primary" data-save="${i.id}">Save</button> <button class="small" data-cancel>Cancel</button></div></div>`
     : `<div class="item"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div></div></div>
        <div class="btns">${buy(i)}<span><button class="small" data-edit="${i.id}">Edit</button> <button class="small del" data-del="${i.id}">✕</button></span></div></div>`).join('');
   const start = prefill ? { name: prefill.name, link: prefill.link } : {};
   prefill = null;
   return `${editing ? '' : `<div class="card"><h2>Add to my list</h2>${prefill === null && start.link ? '<div class="tag" style="margin-bottom:8px">✅ Product added from your share. Check it and press Add item.</div>' : ''}${form(start)}<button class="primary" id="add">Add item</button></div>`}
-    <div class="card"><h2>My list</h2>${items || '<div class="empty">Nothing yet — add something above!</div>'}
+    ${editing ? '' : aboutForm(me)}
+    <div class="card"><h2>My list</h2>${me.items.length ? controls(false) : ''}${items || `<div class="empty">${me.items.length ? 'No items match this filter.' : 'Nothing yet — add something above!'}</div>`}
     <p class="meta">🤫 You can't see what others plan to buy for you.</p>
     ${me.items.length ? '<button class="small del" id="clearall">Clear my whole list (new year)</button>' : ''}</div>`;
 }
 
+// Sort and filter a list of items.
+function tidy(items, others) {
+  const key = (i) => num(i.price) || null;
+  const byDate = (a, b) => String(a.created_at).localeCompare(String(b.created_at));
+  const nullsLast = (f) => (a, b) => (key(a) === null) - (key(b) === null) || f(key(a), key(b));
+  const cmp = {
+    pri: (a, b) => a.priority - b.priority || byDate(a, b),
+    low: nullsLast((x, y) => (x || 0) - (y || 0)),
+    high: nullsLast((x, y) => (y || 0) - (x || 0)),
+    new: (a, b) => byDate(b, a),
+  }[sortBy];
+  return items.filter((i) => (!filterPri || i.priority === filterPri) && !(others && hideTaken && i.claimers.length)).sort(cmp);
+}
+
+function controls(others) {
+  const opt = (v, label, cur) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${label}</option>`;
+  return `<div class="controls">
+    <select id="sort">${opt('pri', 'Sort: priority', sortBy)}${opt('low', 'Sort: price low → high', sortBy)}${opt('high', 'Sort: price high → low', sortBy)}${opt('new', 'Sort: newest first', sortBy)}</select>
+    <select id="fpri">${opt(0, 'Show: all', filterPri)}${opt(1, PRI[1], filterPri)}${opt(2, PRI[2], filterPri)}${opt(3, PRI[3], filterPri)}</select>
+    ${others ? `<label class="chk"><input type="checkbox" id="hidetaken" ${hideTaken ? 'checked' : ''}> Hide taken</label>` : ''}</div>`;
+}
+
+function aboutForm(me) {
+  const filled = INFO.some(([k]) => me.info[k]);
+  return `<details class="card" ${filled ? '' : 'open'}><summary><b>👤 My sizes &amp; interests</b></summary>
+    <p class="meta">Everyone in the family can see this, to make shopping for you easier.</p>
+    ${INFO.map(([k, label, ph]) => `<label class="meta">${label}</label><input id="info_${k}" placeholder="${ph}" value="${esc(me.info[k] || '')}">`).join('')}
+    <button class="primary" id="saveinfo">Save</button></details>`;
+}
+
+// The claim status line and buttons for one item on someone else's list.
+function claimUI(i) {
+  const n = i.claimers.length, mine = !!i.myClaim, who = i.claimers.slice().sort((a, b) => b.mine - a.mine).map((c) => (c.mine ? 'You' : esc(c.name)));
+  const each = num(i.price) && n > 1 ? ` · about ${money(num(i.price) / n)} each` : '';
+  if (!n) return { tag: '', btns: `<button class="small" data-claim="${i.id}">I'll buy this</button><button class="small" data-claim="${i.id}" data-group="1">👥 Group gift</button>` };
+  if (i.isGroup) {
+    const tag = n === 1 ? `👥 ${who[0]} started a group gift. Others can chip in` : `👥 ${who.join(', ')} are chipping in${each}`;
+    const btns = mine
+      ? `<button class="small on" data-unclaim="${i.id}">Leave</button>${n === 1 ? `<button class="small" data-solo="${i.id}">Buy solo</button>` : ''}`
+      : `<button class="small" data-claim="${i.id}" data-group="1">Chip in</button>`;
+    return { tag, btns };
+  }
+  return mine
+    ? { tag: "You're buying this", btns: `<button class="small on" data-unclaim="${i.id}">Unclaim</button><button class="small" data-open="${i.id}">👥 Open to group</button>` }
+    : { tag: `${who[0]} is buying this`, btns: '' };
+}
+
 function theirs(p) {
-  const items = p.items.map((i) => {
-    const mineClaim = i.claimedByMe, other = i.claimedBy && !mineClaim;
-    return `<div class="item ${i.claimedBy ? 'claimed' : ''}"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div>
-      ${i.claimedBy ? `<div class="tag">${mineClaim ? "You're buying this" : esc(i.claimedBy) + ' is buying this'}</div>` : ''}</div></div>
-      <div class="btns">${buy(i)}${other ? '' : `<button class="small ${mineClaim ? 'on' : ''}" data-claim="${i.id}" data-mine="${mineClaim ? 1 : ''}">${mineClaim ? 'Unclaim' : "I'll buy this"}</button>`}</div></div>`;
+  const items = tidy(p.items, true).map((i) => {
+    const ui = claimUI(i);
+    return `<div class="item ${i.claimers.length && !i.isGroup ? 'claimed' : ''}"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div>
+      ${ui.tag ? `<div class="tag">${ui.tag}</div>` : ''}</div></div>
+      <div class="btns">${buy(i)}${ui.btns}</div></div>`;
   }).join('');
-  return `<div class="card"><h2>${esc(p.name)}'s list</h2>${items || `<div class="empty">${esc(p.name)} hasn't added anything yet.</div>`}</div>`;
+  const about = INFO.filter(([k]) => p.info[k]).map(([k, label]) => `<div><b>${label}:</b> ${esc(p.info[k])}</div>`).join('');
+  return `${about ? `<div class="card about"><h2>About ${esc(p.name)}</h2>${about}</div>` : ''}
+    <div class="card"><h2>${esc(p.name)}'s list</h2>${p.items.length ? controls(true) : ''}${items || `<div class="empty">${p.items.length ? 'No items match this filter.' : `${esc(p.name)} hasn't added anything yet.`}</div>`}</div>`;
 }
 
 function shopping() {
   const groups = state.people.filter((p) => p.id !== state.me)
-    .map((p) => ({ p, items: p.items.filter((i) => i.claimedByMe) })).filter((g) => g.items.length);
-  const total = groups.reduce((s, g) => s + g.items.reduce((t, i) => t + num(i.price), 0), 0);
+    .map((p) => ({ p, items: p.items.filter((i) => i.myClaim) })).filter((g) => g.items.length);
+  const share = (i) => num(i.price) / i.claimers.length;
+  const all = groups.flatMap((g) => g.items);
+  const total = all.reduce((t, i) => t + share(i), 0);
+  const boughtTotal = all.filter((i) => i.myClaim.bought).reduce((t, i) => t + share(i), 0);
   const left = state.budget == null ? null : state.budget - total;
-  const body = groups.map((g) => `<h3>For ${esc(g.p.name)}</h3>` + g.items.map((i) =>
-    `<div class="item"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}</div><div class="meta">${meta(i) || 'no price listed'}</div></div></div><div class="btns">${buy(i)}</div></div>`).join('')).join('');
+  const body = groups.map((g) => `<h3>For ${esc(g.p.name)}</h3>` + g.items.map((i) => {
+    const n = i.claimers.length;
+    const price = num(i.price) ? (n > 1 ? `Your share ${money(share(i))} (split ${n} ways)` : money(num(i.price))) : 'no price listed';
+    return `<div class="item ${i.myClaim.bought ? 'done' : ''}"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${n > 1 ? ' 👥' : ''}</div><div class="meta">${price}</div>
+      <label class="chk"><input type="checkbox" data-bought="${i.id}" ${i.myClaim.bought ? 'checked' : ''}> Got it</label></div></div><div class="btns">${buy(i)}</div></div>`;
+  }).join('')).join('');
   return `<div class="card"><h2>My shopping</h2>
     ${body || '<div class="empty">Nothing yet. Press “I\'ll buy this” on someone\'s list.</div>'}
     <div class="total"><span>Planned total</span><span>${money(total)}</span></div>
-    <div class="meta">Only items with a price are counted. Only you can see this tab.</div></div>
+    <div class="total"><span>Already bought</span><span>${money(boughtTotal)}</span></div>
+    <div class="total"><span>Still to buy</span><span>${money(total - boughtTotal)}</span></div>
+    <div class="meta">Only items with a price are counted, and group gifts count only your share. Only you can see this tab.</div></div>
     <div class="card"><h2>My budget</h2>
     <input id="bud" type="number" min="0" step="1" placeholder="Total I want to spend" value="${state.budget ?? ''}">
     <button class="primary" id="savebud">Save budget</button>
@@ -243,7 +317,7 @@ function shopping() {
 function wire() {
   const act = async (fn) => {
     try { const r = await fn(); if (r && r.error) throw r.error; }
-    catch (e) { alert(/duplicate/.test(e.message) ? 'Someone just claimed that.' : e.message); }
+    catch (e) { alert(/duplicate|row-level security/.test(e.message) ? 'That item was just taken by someone else. Refreshing.' : e.message); }
     await load();
   };
   const fields = () => ({ name: $('#n').value.trim(), price: $('#pr').value.trim(), link: $('#l').value.trim(), notes: $('#no').value.trim(), priority: +$('#pri').value });
@@ -286,9 +360,28 @@ function wire() {
       editing = null;
       return db.from('items').update(f).eq('id', b.dataset.save);
     }); });
-  document.querySelectorAll('[data-claim]').forEach((b) => b.onclick = () => act(() => b.dataset.mine
-    ? db.from('claims').delete().eq('item_id', b.dataset.claim)
-    : db.from('claims').insert({ item_id: b.dataset.claim, claimed_by: state.me })));
+  document.querySelectorAll('[data-claim]').forEach((b) => b.onclick = () =>
+    act(() => db.from('claims').insert({ item_id: b.dataset.claim, claimed_by: state.me, is_group: !!b.dataset.group })));
+  document.querySelectorAll('[data-unclaim]').forEach((b) => b.onclick = () =>
+    act(() => db.from('claims').delete().eq('item_id', b.dataset.unclaim).eq('claimed_by', state.me)));
+  const setGroup = (attr, val) => document.querySelectorAll(`[data-${attr}]`).forEach((b) => b.onclick = () =>
+    act(() => db.from('claims').update({ is_group: val }).eq('item_id', b.dataset[attr]).eq('claimed_by', state.me)));
+  setGroup('open', true);
+  setGroup('solo', false);
+  document.querySelectorAll('[data-bought]').forEach((b) => b.onchange = () =>
+    act(() => db.from('claims').update({ bought: b.checked }).eq('item_id', b.dataset.bought).eq('claimed_by', state.me)));
+  const rerender = () => renderApp();
+  if ($('#sort')) $('#sort').onchange = (e) => { sortBy = e.target.value; rerender(); };
+  if ($('#fpri')) $('#fpri').onchange = (e) => { filterPri = +e.target.value; rerender(); };
+  if ($('#hidetaken')) $('#hidetaken').onchange = (e) => { hideTaken = e.target.checked; rerender(); };
+  const si = $('#saveinfo');
+  if (si) si.onclick = () => act(async () => {
+    const f = {};
+    INFO.forEach(([k]) => { f[k] = $('#info_' + k).value.trim(); });
+    const r = await db.from('profiles').update(f).eq('id', state.me);
+    if (!r.error) alert('Saved!');
+    return r;
+  });
   const ca = $('#clearall');
   if (ca) ca.onclick = () => {
     const mineItems = state.people.find((p) => p.id === state.me).items;
