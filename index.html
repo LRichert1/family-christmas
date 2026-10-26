@@ -74,6 +74,22 @@ let sortBy = 'pri', filterPri = 0, hideTaken = false;
 const INFO = [['shirt_size', '👕 Shirt', 'e.g. Large'], ['pants_size', '👖 Pants', 'e.g. Large'], ['jeans_size', '👖 Jeans', 'e.g. 32x34'],
   ['shoe_size', '👟 Shoe', 'e.g. 10.5'], ['jewelry_color', '💍 Jewelry color', 'e.g. Gold, silver, rose gold'], ['interests', '⭐ Interests', 'Sports teams, shows, characters…']];
 
+// Amazon titles are keyword soup. Keep just the core product name: cut at the first comma, " - ", "(" or " with ", then cap at 5 words.
+function shortenName(s) {
+  s = String(s || '').trim();
+  let t = s.split(/\s[-–—|]\s|,|\(|\s(?:with|w\/)\s/i)[0].trim();
+  if (t.split(/\s+/).length < 2) t = s;
+  const words = t.split(/\s+/);
+  if (words.length > 5) t = words.slice(0, 5).join(' ');
+  return t.slice(0, 120);
+}
+
+// Keep a half-filled "Add to my list" form when the app is closed, reloaded or switched away from (e.g. to go look at Amazon).
+const draftKey = () => 'xmasDraft:' + (state && state.me);
+const readDraft = () => { try { return JSON.parse(localStorage.getItem(draftKey())) || {}; } catch { return {}; } };
+const saveDraft = (d) => { try { localStorage.setItem(draftKey(), JSON.stringify(d)); } catch {} };
+const clearDraft = () => { try { localStorage.removeItem(draftKey()); } catch {} };
+
 // Pull a product link (and a name, if there is one) out of whatever Amazon or a browser shared.
 function parseShared(text) {
   const m = /https?:\/\/[^\s<>"']+/i.exec(text || '');
@@ -86,7 +102,7 @@ function parseShared(text) {
     const s = /amazon\.[a-z.]+\/([^/?#]+)\/(?:dp|gp\/product)\//i.exec(link);
     if (s) name = decodeURIComponent(s[1]).replace(/-/g, ' ');
   }
-  return { link, name: name.slice(0, 120) };
+  return { link, name: shortenName(name) };
 }
 (() => {
   const q = new URLSearchParams(location.search);
@@ -231,9 +247,11 @@ function mine() {
     ? `<div class="item"><div style="width:100%">${form(i)}<button class="primary" data-save="${i.id}">Save</button> <button class="small" data-cancel>Cancel</button></div></div>`
     : `<div class="item"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div></div></div>
        <div class="btns">${buy(i)}<span><button class="small" data-edit="${i.id}">Edit</button> <button class="small del" data-del="${i.id}">✕</button></span></div></div>`).join('');
-  const start = prefill ? { name: prefill.name, link: prefill.link } : {};
+  const fromShare = !!prefill;
+  const start = prefill ? { ...readDraft(), name: prefill.name, link: prefill.link } : readDraft();
+  if (prefill) saveDraft(start);
   prefill = null;
-  return `${editing ? '' : `<div class="card"><h2>Add to my list</h2>${prefill === null && start.link ? '<div class="tag" style="margin-bottom:8px">✅ Product added from your share. Check it and press Add item.</div>' : ''}${form(start)}<button class="primary" id="add">Add item</button></div>`}
+  return `${editing ? '' : `<div class="card"><h2>Add to my list</h2>${fromShare ? '<div class="tag" style="margin-bottom:8px">✅ Product added from your share. Check it and press Add item.</div>' : ''}${form(start)}<button class="primary" id="add">Add item</button></div>`}
     ${editing ? '' : aboutForm(me)}
     <div class="card"><h2>My list</h2>${me.items.length ? controls(false) : ''}${items || `<div class="empty">${me.items.length ? 'No items match this filter.' : 'Nothing yet — add something above!'}</div>`}
     <p class="meta">🤫 You can't see what others plan to buy for you.</p>
@@ -346,12 +364,15 @@ function wire() {
   const photo = () => ($('#ph') && $('#ph').files[0]) || null;
   const a = $('#add');
   if (a) a.onclick = () => { const f = fields(); if (!f.name) return alert('Enter an item name.'); a.disabled = true;
-    act(async () => { const file = photo(); if (file) f.image_path = await uploadPhoto(file); return db.from('items').insert({ ...f, owner: state.me }); }); };
+    act(async () => { const file = photo(); if (file) f.image_path = await uploadPhoto(file); const r = await db.from('items').insert({ ...f, owner: state.me }); if (!r.error) clearDraft(); return r; }); };
+  const keepDraft = () => saveDraft({ name: $('#n').value, priority: +$('#pri').value, link: $('#l').value, price: $('#pr').value, notes: $('#no').value });
+  if (a) ['n', 'pri', 'l', 'pr', 'no'].forEach((id) => { $('#' + id).addEventListener('input', keepDraft); $('#' + id).addEventListener('change', keepDraft); });
   const fillFrom = (text) => {
     const p = parseShared(text);
     if (!p) return false;
     $('#l').value = p.link;
     if (!$('#n').value.trim() && p.name) $('#n').value = p.name;
+    if (a) keepDraft();
     return true;
   };
   const lf = $('#l');
@@ -432,7 +453,8 @@ function wire() {
 }
 
 $('#out').onclick = async () => { await db.auth.signOut(); state = null; renderLogin(); };
-document.addEventListener('visibilitychange', () => { if (!document.hidden && state && !editing) load(); });
+// Refresh when coming back to the app, but never wipe a photo that was just picked.
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state && !editing && !($('#ph') && $('#ph').files.length)) load(); });
 countdown();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 load();
