@@ -261,6 +261,16 @@ function pvHtml(url) {
 }
 
 // Link previews (title + picture) for stores other than Amazon, from the free microlink.io service. Amazon is never looked up.
+// Long tracking links break the 500-character limit: shrink Amazon links to /dp/ASIN, otherwise drop the ?tracking part
+function cleanLink(u) {
+  try {
+    const x = new URL(fixLink(u));
+    const m = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i.exec(x.pathname);
+    if (m && /(^|\.)amazon\./i.test(x.hostname)) return `https://${x.hostname}/dp/${m[1].toUpperCase()}`;
+    if (u.length > 500) return x.origin + x.pathname;
+  } catch {}
+  return u;
+}
 const amazonHost = (u) => { try { return /(^|\.)(amazon\.[a-z.]+|a\.co|amzn\.[a-z]+)$/i.test(new URL(fixLink(u)).hostname); } catch { return false; } };
 async function fetchPreview(url) {
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 9000);
@@ -445,7 +455,7 @@ function wire() {
   // which list the page is showing: my own, or a child I manage
   const cur = () => state.people.find((p) => p.id === (view === 'mine' ? state.me : view));
   const kidCtx = () => (typeof view === 'string' && view.startsWith('kid:') ? view.slice(4) : null);
-  const fields = () => ({ name: $('#n').value.trim(), price: $('#pr').value.trim(), link: $('#l').value.trim(), notes: $('#no').value.trim(), priority: +$('#pri').value, image_url: $('#imgurl').value || null });
+  const fields = () => ({ name: $('#n').value.trim(), price: $('#pr').value.trim(), link: cleanLink($('#l').value.trim()), notes: $('#no').value.trim(), priority: +$('#pri').value, image_url: $('#imgurl').value || null });
   const photo = () => ($('#ph') && $('#ph').files[0]) || null;
   const a = $('#add');
   if (a) a.onclick = () => { const f = fields(); if (!f.name) return alert('Enter an item name.'); a.disabled = true;
