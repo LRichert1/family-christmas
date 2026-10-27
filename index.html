@@ -87,7 +87,7 @@ function shortenName(s) {
 }
 
 // Keep a half-filled "Add to my list" form when the app is closed, reloaded or switched away from (e.g. to go look at Amazon).
-const draftKey = () => 'xmasDraft:' + (state && state.me);
+const draftKey = () => 'xmasDraft:' + (state && state.me) + (typeof view === 'string' && view.startsWith('kid:') ? ':' + view : '');
 const readDraft = () => { try { return JSON.parse(localStorage.getItem(draftKey())) || {}; } catch { return {}; } };
 const saveDraft = (d) => { try { localStorage.setItem(draftKey(), JSON.stringify(d)); } catch {} };
 const clearDraft = () => { try { localStorage.removeItem(draftKey()); } catch {} };
@@ -148,14 +148,17 @@ async function load() {
   const { data: { session } } = await db.auth.getSession();
   if (!session) return renderLogin();
   const me = session.user.id;
-  const [p, i, c, b, f, m] = await Promise.all([
+  const [p, i, c, b, f, m, kq, kmq] = await Promise.all([
     db.from('profiles').select('*').order('display_name'),
     db.from('items').select('*').order('priority').order('created_at'),
     db.from('claims').select('*'),
     db.from('budgets').select('*').maybeSingle(),
     db.from('families').select('id,name').order('name'),
     db.from('memberships').select('*'),
+    db.from('kids').select('*').order('name'),
+    db.from('kid_managers').select('*'),
   ]);
+  const kids = kq.error ? [] : kq.data, kidMgrs = kmq.error ? [] : kmq.data;
   const err = p.error || i.error || c.error || b.error || f.error || m.error;
   if (err) return alert(err.message);
   if (!p.data.some((u) => u.id === me)) { await db.auth.signOut(); return renderLogin('Please sign in again.'); }
@@ -164,23 +167,38 @@ async function load() {
   c.data.forEach((x) => (claimsBy[x.item_id] = claimsBy[x.item_id] || []).push(x));
   const famsOf = {};
   m.data.forEach((x) => (famsOf[x.user_id] = famsOf[x.user_id] || []).push(x.family_id));
+  const itemsWhere = (test) => i.data.filter(test).map((x) => {
+    const cl = claimsBy[x.id] || [];
+    return {
+      ...x,
+      claimers: cl.map((k) => ({ name: names[k.claimed_by] || 'Someone', mine: k.claimed_by === me })),
+      myClaim: cl.find((k) => k.claimed_by === me) || null,
+      isGroup: cl.length > 0 && cl.every((k) => k.is_group),
+      groupFamily: (cl.find((k) => k.is_group) || {}).group_family || null,
+    };
+  });
+  const mgrsOf = {};
+  kidMgrs.forEach((x) => (mgrsOf[x.kid_id] = mgrsOf[x.kid_id] || []).push(x.user_id));
   state = {
     me,
     budget: b.data ? Number(b.data.amount) : null,
     families: f.data,
-    people: p.data.map((u) => ({
-      id: u.id, name: u.display_name, info: u, famIds: famsOf[u.id] || [],
-      items: i.data.filter((x) => x.owner === u.id).map((x) => {
-        const cl = claimsBy[x.id] || [];
+    people: [
+      ...p.data.map((u) => ({
+        id: u.id, name: u.display_name, info: u, famIds: famsOf[u.id] || [],
+        items: itemsWhere((x) => x.owner === u.id && !x.kid_id),
+      })),
+      // children: no login, managed by their parents, visible to the families of those parents
+      ...kids.map((k) => {
+        const mg = mgrsOf[k.id] || [];
         return {
-          ...x,
-          claimers: cl.map((k) => ({ name: names[k.claimed_by] || 'Someone', mine: k.claimed_by === me })),
-          myClaim: cl.find((k) => k.claimed_by === me) || null,
-          isGroup: cl.length > 0 && cl.every((k) => k.is_group),
-          groupFamily: (cl.find((k) => k.is_group) || {}).group_family || null,
+          id: 'kid:' + k.id, kidId: k.id, isKid: true, name: k.name, birthYear: k.birth_year, info: k,
+          managers: mg.map((id) => names[id] || 'Someone'), iManage: mg.includes(me),
+          famIds: [...new Set(mg.flatMap((id) => famsOf[id] || []))],
+          items: itemsWhere((x) => x.kid_id === k.id),
         };
       }),
-    })),
+    ],
   };
   renderApp();
 }
@@ -222,10 +240,11 @@ function renderApp() {
   const tab = (v, label) => `<button class="${view === v ? 'active' : ''}" data-v="${esc(v)}">${label}</button>`;
   const mineRow = `<div class="tabs">${tab('mine', 'My list')}${tab('shop', '🛍 Shopping')}</div>`;
   const people = state.families.length > 1
-    ? state.families.map((f) => `<div class="famname">${esc(f.name)}</div><div class="tabs">${others.filter((p) => p.famIds.includes(f.id)).map((p) => tab(p.id, esc(p.name))).join('') || '<span class="meta">No one else here yet</span>'}</div>`).join('')
-    : `<div class="tabs">${others.map((p) => tab(p.id, esc(p.name))).join('')}</div>`;
+    ? state.families.map((f) => `<div class="famname">${esc(f.name)}</div><div class="tabs">${others.filter((p) => p.famIds.includes(f.id)).map((p) => tab(p.id, esc(p.name) + (p.isKid ? ' 🧒' : ''))).join('') || '<span class="meta">No one else here yet</span>'}</div>`).join('')
+    : `<div class="tabs">${others.map((p) => tab(p.id, esc(p.name) + (p.isKid ? ' 🧒' : ''))).join('')}</div>`;
   const tabs = mineRow + people;
-  $('#app').innerHTML = tabs + (view === 'mine' ? mine() : view === 'shop' ? shopping() : theirs(others.find((p) => p.id === view)));
+  const person = others.find((p) => p.id === view);
+  $('#app').innerHTML = tabs + (view === 'mine' ? mine() : view === 'shop' ? shopping() : person.iManage ? kidManage(person) : theirs(person));
   document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => { view = b.dataset.v; editing = null; renderApp(); });
   wire();
 }
@@ -255,9 +274,9 @@ async function fetchPreview(url) {
 function pri(i) { return `<span class="pri p${i.priority}">${PRI[i.priority]}</span>`; }
 function buy(i) { return i.link ? `<a class="small buy" href="${esc(fixLink(i.link))}" target="_blank" rel="noopener">Buy ↗</a>` : ''; }
 
-function mine() {
-  const me = state.people.find((p) => p.id === state.me);
-  const form = (i = {}) => `<input id="n" placeholder="What do you want?" value="${esc(i.name)}">
+// The add/edit form for one item (shared by your own list and the lists of children you manage).
+function itemForm(i = {}) {
+  return `<input id="n" placeholder="What do you want?" value="${esc(i.name)}">
     <div id="trim"></div>
     <select id="pri">${[1, 2, 3].map((k) => `<option value="${k}" ${(i.priority || 2) === k ? 'selected' : ''}>${PRI[k]}</option>`).join('')}</select>
     <div class="linkrow"><input id="l" placeholder="Product link (optional)" value="${esc(i.link)}"><button class="small" type="button" id="pst">📋 Paste</button></div>
@@ -268,6 +287,38 @@ function mine() {
     <div class="row"><input id="pr" placeholder="Price (optional)" value="${esc(i.price)}"><input id="no" placeholder="Size, color… (optional)" value="${esc(i.notes)}"></div>
     <label class="file">📷 Photo ${i.image_path ? '(choose a new one to replace)' : '(optional)'}<input id="ph" type="file" accept="image/*"></label>
     <div class="meta" style="margin:-2px 0 8px">Tip: take a screenshot of the product picture in the shopping app, then choose it here.</div>`;
+}
+
+// A child's page for the parents who manage them: edit the list and sizes, see claims, add another parent.
+function kidManage(p) {
+  const fromShare = !!prefill;
+  const start = prefill ? { ...readDraft(), name: prefill.name, link: prefill.link } : readDraft();
+  if (prefill) saveDraft(start);
+  prefill = null;
+  const age = p.birthYear ? new Date().getFullYear() - p.birthYear : null;
+  const items = tidy(p.items, true).map((i) => {
+    if (editing === i.id) return `<div class="item"><div style="width:100%">${itemForm(i)}<button class="primary" data-save="${i.id}">Save</button> <button class="small" data-cancel>Cancel</button></div></div>`;
+    const ui = claimUI(i, p);
+    return `<div class="item ${i.claimers.length && !i.isGroup ? 'claimed' : ''}"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div>
+      ${ui.tag ? `<div class="tag">${ui.tag}</div>` : ''}</div></div>
+      <div class="btns">${buy(i)}${ui.btns}<span><button class="small" data-edit="${i.id}">Edit</button> <button class="small del" data-del="${i.id}">✕</button></span></div></div>`;
+  }).join('');
+  return `<div class="card"><h2>${esc(p.name)} 🧒${age !== null ? ` <span class="meta">(about ${age})</span>` : ''}</h2>
+    <div class="meta">Managed by ${esc(p.managers.join(', '))}. Relatives in your families can see this list and claim items. Unlike your own list, you can see what has been claimed.</div></div>
+    ${editing ? '' : `<div class="card"><h2>Add to ${esc(p.name)}'s list</h2>${fromShare ? '<div class="tag" style="margin-bottom:8px">✅ Product added from your share. Check it and press Add item.</div>' : ''}${itemForm(start)}<button class="primary" id="add">Add item</button></div>`}
+    ${editing ? '' : aboutForm(p)}
+    <div class="card"><h2>${esc(p.name)}'s list</h2>${p.items.length ? controls(true) : ''}${items || `<div class="empty">${p.items.length ? 'No items match this filter.' : 'Nothing yet — add something above!'}</div>`}
+    ${p.items.length ? `<button class="small del" id="clearall">Clear ${esc(p.name)}'s whole list (new year)</button>` : ''}</div>
+    <div class="card"><h2>Manage ${esc(p.name)}</h2>
+    <div class="linkrow"><input id="mgr" placeholder="Other parent's username"><button class="small" id="addmgr">Add parent</button></div>
+    <div class="meta" style="margin-bottom:10px">They need an account in one of your families. They can then edit ${esc(p.name)}'s list too.</div>
+    <button class="small del" id="delkid">Delete ${esc(p.name)} and their list</button></div>`;
+}
+
+function mine() {
+  const me = state.people.find((p) => p.id === state.me);
+  const form = itemForm;
+  const myKids = state.people.filter((p) => p.isKid && p.iManage);
   const items = tidy(me.items, false).map((i) => editing === i.id
     ? `<div class="item"><div style="width:100%">${form(i)}<button class="primary" data-save="${i.id}">Save</button> <button class="small" data-cancel>Cancel</button></div></div>`
     : `<div class="item"><div class="main">${thumb(i)}<div><div class="t">${esc(i.name)}${pri(i)}</div><div class="meta">${meta(i)}</div></div></div>
@@ -281,6 +332,11 @@ function mine() {
     <div class="card"><h2>My list</h2>${me.items.length ? controls(false) : ''}${items || `<div class="empty">${me.items.length ? 'No items match this filter.' : 'Nothing yet — add something above!'}</div>`}
     <p class="meta">🤫 You can't see what others plan to buy for you.</p>
     ${me.items.length ? '<button class="small del" id="clearall">Clear my whole list (new year)</button>' : ''}</div>
+    <div class="card"><h2>My children</h2>
+    ${myKids.length ? `<div class="tabs">${myKids.map((k) => `<button data-v="${esc(k.id)}">🧒 ${esc(k.name)}</button>`).join('')}</div>` : `<div class="meta" style="margin-bottom:8px">Add a child to give them their own list. No phone or login needed.</div>`}
+    <div class="row"><input id="kidname" placeholder="Child's name"><input id="kidyear" type="number" inputmode="numeric" placeholder="Birth year (optional)"></div>
+    <button class="primary" id="addkid">Add child</button>
+    <div class="meta">You, and any other parent you add, can manage their list. Everyone in your families can see it.</div></div>
     <div class="card"><h2>My families</h2>
     <div class="meta" style="margin-bottom:8px">${state.families.map((f) => esc(f.name)).join(' · ') || 'None yet'}</div>
     <div class="linkrow"><input id="famcode" placeholder="Code for another family"><button class="small" id="joinfam">Join</button></div>
@@ -311,8 +367,9 @@ function controls(others) {
 
 function aboutForm(me) {
   const filled = INFO.some(([k]) => me.info[k]);
-  return `<details class="card" ${filled ? '' : 'open'}><summary><b>👤 My sizes &amp; interests</b></summary>
-    <p class="meta">Everyone in the family can see this, to make shopping for you easier.</p>
+  const who = me.isKid ? `${esc(me.name)}'s` : 'My';
+  return `<details class="card" ${filled ? '' : 'open'}><summary><b>👤 ${who} sizes &amp; interests</b></summary>
+    <p class="meta">Everyone in the family can see this, to make shopping easier.</p>
     ${INFO.map(([k, label, ph]) => `<label class="meta">${label}</label><input id="info_${k}" placeholder="${ph}" value="${esc(me.info[k] || '')}">`).join('')}
     <button class="primary" id="saveinfo">Save</button></details>`;
 }
@@ -385,11 +442,14 @@ function wire() {
     catch (e) { alert(/duplicate|row-level security/.test(e.message) ? 'That item was just taken by someone else. Refreshing.' : e.message); }
     await load();
   };
+  // which list the page is showing: my own, or a child I manage
+  const cur = () => state.people.find((p) => p.id === (view === 'mine' ? state.me : view));
+  const kidCtx = () => (typeof view === 'string' && view.startsWith('kid:') ? view.slice(4) : null);
   const fields = () => ({ name: $('#n').value.trim(), price: $('#pr').value.trim(), link: $('#l').value.trim(), notes: $('#no').value.trim(), priority: +$('#pri').value, image_url: $('#imgurl').value || null });
   const photo = () => ($('#ph') && $('#ph').files[0]) || null;
   const a = $('#add');
   if (a) a.onclick = () => { const f = fields(); if (!f.name) return alert('Enter an item name.'); a.disabled = true;
-    act(async () => { const file = photo(); if (file) { f.image_path = await uploadPhoto(file); f.image_url = null; } const r = await db.from('items').insert({ ...f, owner: state.me }); if (!r.error) clearDraft(); return r; }); };
+    act(async () => { const file = photo(); if (file) { f.image_path = await uploadPhoto(file); f.image_url = null; } const r = await db.from('items').insert({ ...f, owner: state.me, kid_id: kidCtx() }); if (!r.error) clearDraft(); return r; }); };
   const keepDraft = () => saveDraft({ name: $('#n').value, priority: +$('#pri').value, link: $('#l').value, price: $('#pr').value, notes: $('#no').value, image_url: $('#imgurl').value });
   if (a) ['n', 'pri', 'l', 'pr', 'no'].forEach((id) => { $('#' + id).addEventListener('input', keepDraft); $('#' + id).addEventListener('change', keepDraft); });
   const showPv = () => { $('#pv').innerHTML = pvHtml($('#imgurl').value); const rm = $('#rmimg'); if (rm) rm.onclick = () => { $('#imgurl').value = ''; showPv(); if (a) keepDraft(); }; };
@@ -457,7 +517,7 @@ function wire() {
     };
   }
   document.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirm('Remove this item?') && act(async () => {
-    const it = state.people.find((p) => p.id === state.me).items.find((x) => x.id === b.dataset.del);
+    const it = cur().items.find((x) => x.id === b.dataset.del);
     const r = await db.from('items').delete().eq('id', b.dataset.del);
     if (!r.error && it.image_path) await db.storage.from('item-images').remove([it.image_path]);
     return r;
@@ -466,7 +526,7 @@ function wire() {
   document.querySelectorAll('[data-cancel]').forEach((b) => b.onclick = () => { editing = null; renderApp(); });
   document.querySelectorAll('[data-save]').forEach((b) => b.onclick = () => { const f = fields(); if (!f.name) return alert('Enter an item name.'); b.disabled = true;
     act(async () => {
-      const it = state.people.find((p) => p.id === state.me).items.find((x) => x.id === b.dataset.save);
+      const it = cur().items.find((x) => x.id === b.dataset.save);
       const file = photo();
       if (file) { f.image_path = await uploadPhoto(file); f.image_url = null; if (it.image_path) await db.storage.from('item-images').remove([it.image_path]); }
       editing = null;
@@ -500,18 +560,50 @@ function wire() {
   if (si) si.onclick = () => act(async () => {
     const f = {};
     INFO.forEach(([k]) => { f[k] = $('#info_' + k).value.trim(); });
-    const r = await db.from('profiles').update(f).eq('id', state.me);
+    const r = kidCtx() ? await db.from('kids').update(f).eq('id', kidCtx()) : await db.from('profiles').update(f).eq('id', state.me);
     if (!r.error) alert('Saved!');
     return r;
   });
   const ca = $('#clearall');
   if (ca) ca.onclick = () => {
-    const mineItems = state.people.find((p) => p.id === state.me).items;
-    if (!confirm(`Remove all ${mineItems.length} items from your list? This can't be undone, and anyone who marked an item as bought loses that note.`)) return;
+    const mineItems = cur().items;
+    if (!confirm(`Remove all ${mineItems.length} items from ${kidCtx() ? cur().name + "'s" : 'your'} list? This can't be undone, and anyone who marked an item as bought loses that note.`)) return;
     act(async () => {
-      const r = await db.from('items').delete().eq('owner', state.me);
+      const r = kidCtx() ? await db.from('items').delete().eq('kid_id', kidCtx()) : await db.from('items').delete().eq('owner', state.me).is('kid_id', null);
       const paths = mineItems.map((i) => i.image_path).filter(Boolean);
       if (!r.error && paths.length) await db.storage.from('item-images').remove(paths);
+      return r;
+    });
+  };
+  const ak = $('#addkid');
+  if (ak) ak.onclick = () => {
+    const name = $('#kidname').value.trim(), year = $('#kidyear').value.trim();
+    if (!name) return alert("Enter the child's name.");
+    if (year && !(+year >= 2000 && +year <= new Date().getFullYear())) return alert('Enter a four-digit birth year, like 2021, or leave it empty.');
+    act(async () => {
+      const r = await db.rpc('add_kid', { p_name: name, p_birth_year: year ? +year : null });
+      if (!r.error) view = 'kid:' + r.data;
+      return r;
+    });
+  };
+  const am = $('#addmgr');
+  if (am) am.onclick = () => {
+    const u = $('#mgr').value.trim();
+    if (!u) return alert("Enter the other parent's username.");
+    act(async () => {
+      const r = await db.rpc('add_kid_manager', { p_kid: kidCtx(), p_username: u });
+      if (!r.error) alert(`${r.data} can now manage ${cur().name}'s list.`);
+      return r;
+    });
+  };
+  const dk = $('#delkid');
+  if (dk) dk.onclick = () => {
+    const k = cur();
+    if (!confirm(`Delete ${k.name} and their whole list? This can't be undone, and it removes ${k.name} for the other parents too.`)) return;
+    act(async () => {
+      const paths = k.items.map((i) => i.image_path).filter(Boolean);
+      const r = await db.from('kids').delete().eq('id', k.kidId);
+      if (!r.error) { view = 'mine'; if (paths.length) await db.storage.from('item-images').remove(paths); }
       return r;
     });
   };
