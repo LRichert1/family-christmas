@@ -56,6 +56,7 @@ label.file input{padding:6px}
 details summary{cursor:pointer;margin-bottom:8px}
 .about div{margin:2px 0;font-size:.95rem}
 .famname{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);margin:4px 0 6px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .over{color:var(--red)}
 .under{color:var(--green)}
 </style>
@@ -77,10 +78,11 @@ const INFO = [['shirt_size', '👕 Shirt', 'e.g. Large'], ['pants_size', '👖 P
 // Amazon titles are keyword soup. Keep just the core product name: cut at the first comma, " - ", "(" or " with ", then cap at 5 words.
 function shortenName(s) {
   s = String(s || '').trim();
-  let t = s.split(/\s[-–—|]\s|,|\(|\s(?:with|w\/)\s/i)[0].trim();
+  let t = s.split(/\s[-–—|:]\s|,|\(|\s(?:with|w\/|for|and|that|which|to|in|by|condenses|compatible|designed|featuring|includes|perfect|ideal|suitable|helps|keeps|makes)\s/i)[0].trim();
   if (t.split(/\s+/).length < 2) t = s;
+  const cap = t.length < s.length ? 5 : 4; // a natural break was found: allow one more word
   const words = t.split(/\s+/);
-  if (words.length > 5) t = words.slice(0, 5).join(' ');
+  if (words.length > cap) t = words.slice(0, cap).join(' ');
   return t.slice(0, 120);
 }
 
@@ -102,7 +104,7 @@ function parseShared(text) {
     const s = /amazon\.[a-z.]+\/([^/?#]+)\/(?:dp|gp\/product)\//i.exec(link);
     if (s) name = decodeURIComponent(s[1]).replace(/-/g, ' ');
   }
-  return { link, name: shortenName(name) };
+  return { link, name: shortenName(name), full: name.slice(0, 200) };
 }
 (() => {
   const q = new URLSearchParams(location.search);
@@ -247,7 +249,7 @@ async function fetchPreview(url) {
     const r = await fetch('https://api.microlink.io/?url=' + encodeURIComponent(fixLink(url)), { signal: ctl.signal });
     const j = await r.json(), d = j.data || {};
     if (j.status !== 'success' || !d.title || /access denied|just a moment|attention required|are you a robot|captcha|forbidden|not found|unavailable|404|403|error/i.test(d.title)) return null;
-    return { title: shortenName(d.title), image: (d.image && d.image.url) || '' };
+    return { title: shortenName(d.title), full: d.title.slice(0, 200), image: (d.image && d.image.url) || '' };
   } catch { return null; } finally { clearTimeout(timer); }
 }
 function pri(i) { return `<span class="pri p${i.priority}">${PRI[i.priority]}</span>`; }
@@ -256,6 +258,7 @@ function buy(i) { return i.link ? `<a class="small buy" href="${esc(fixLink(i.li
 function mine() {
   const me = state.people.find((p) => p.id === state.me);
   const form = (i = {}) => `<input id="n" placeholder="What do you want?" value="${esc(i.name)}">
+    <div id="trim"></div>
     <select id="pri">${[1, 2, 3].map((k) => `<option value="${k}" ${(i.priority || 2) === k ? 'selected' : ''}>${PRI[k]}</option>`).join('')}</select>
     <div class="linkrow"><input id="l" placeholder="Product link (optional)" value="${esc(i.link)}"><button class="small" type="button" id="pst">📋 Paste</button></div>
     <div class="linkrow"><select id="store" style="width:auto;flex:1"><option value="google">Search: Google Shopping</option><option value="amazon">Search: Amazon</option><option value="walmart">Search: Walmart</option><option value="target">Search: Target</option></select><button class="small" type="button" id="srch">🔍 Search</button></div>
@@ -392,6 +395,19 @@ function wire() {
   const showPv = () => { $('#pv').innerHTML = pvHtml($('#imgurl').value); const rm = $('#rmimg'); if (rm) rm.onclick = () => { $('#imgurl').value = ''; showPv(); if (a) keepDraft(); }; };
   if ($('#pv')) showPv();
   if ($('#ph')) $('#ph').addEventListener('change', () => { if ($('#ph').files.length) { $('#imgurl').value = ''; showPv(); } });
+  // When a name was filled in automatically, show its words so the end of the name can be picked with one tap.
+  const showTrim = (full) => {
+    const box = $('#trim');
+    if (!box) return;
+    const words = String(full || '').split(/\s+/).filter(Boolean).slice(0, 14);
+    if (words.length < 3) { box.innerHTML = ''; return; }
+    box.innerHTML = `<div class="meta" style="margin:-2px 0 4px">Name too long? Tap the last word it should end on:</div><div class="chips">${words.map((w, k) => `<button type="button" class="small" data-k="${k}">${esc(w)}</button>`).join('')}</div>`;
+    box.querySelectorAll('[data-k]').forEach((b) => b.onclick = () => {
+      $('#n').value = words.slice(0, +b.dataset.k + 1).join(' ').replace(/[,;:]+$/, '');
+      if (a) keepDraft();
+    });
+  };
+  if ($('#n')) $('#n').addEventListener('input', () => { if ($('#trim')) $('#trim').innerHTML = ''; });
   // look up a name + picture for the link in the box (never for Amazon)
   const runPreview = async () => {
     const link = $('#l') && $('#l').value.trim();
@@ -401,7 +417,7 @@ function wire() {
     const p = await fetchPreview(link);
     if (!$('#l') || $('#l').value.trim() !== link) return;
     if (!p) { $('#pvmsg').textContent = "Couldn't load a preview for that site. Type the name and add a photo."; return; }
-    if (!$('#n').value.trim() && p.title) $('#n').value = p.title;
+    if (!$('#n').value.trim() && p.title) { $('#n').value = p.title; showTrim(p.full); }
     if (p.image && !photo()) { $('#imgurl').value = p.image; showPv(); }
     $('#pvmsg').textContent = '✅ Preview loaded. Check the name and picture.';
     if (a) keepDraft();
@@ -411,7 +427,7 @@ function wire() {
     const p = parseShared(text);
     if (!p) return false;
     $('#l').value = p.link;
-    if (!$('#n').value.trim() && p.name) $('#n').value = p.name;
+    if (!$('#n').value.trim() && p.name) { $('#n').value = p.name; showTrim(p.full); }
     if (a) keepDraft();
     runPreview();
     return true;
