@@ -24,6 +24,10 @@
     return age <= 2 ? 'b' : age <= 12 ? 'k' : 'a';
   };
 
+  // Ideas that clearly suit only one gender are left out for the other (when a gender is set).
+  const FEM = /leggings|\bdress|tutu|leotard|skirt|mary jane|scrunchie|hair (clip|towel|dryer|straight|curl|oil|bow)|claw clip|heatless|curling|straightener|makeup|\blip (balm|gloss|butter|scrub|mask)|lipstick|mascara|eyeshadow|eyelash|\bbrow\b|blush|foundation|nail|press-on|necklace|earring|bracelet|anklet|ring dish|stackable ring|jewelry|purse|handbag|crossbody|bag charm|bag scarf|wide-leg|perfume|body mist|candle warmer|bath bomb|fairy|princess|mermaid|skincare|serum|sheet mask|jade roller|facial|pearl|birthstone|locket|ear cuff|silk pillowcase|teddy|sephora/i;
+  const MASC = /tie clip|cufflink|beard|shaving|razor|\bmen'?s\b|suspenders|bow tie|necktie|pocket square|cologne|aftershave|barber/i;
+
   // Ideas for one person: matched topics first (mixed together), then general ideas. Skips what is already on their list.
   window.makeIdeas = (person, seed) => {
     const aud = window.audienceOf(person);
@@ -31,7 +35,10 @@
     const interests = String((person.info && person.info.interests) || '').toLowerCase();
     const names = person.items.map((i) => i.name).join(' | ').toLowerCase();
     const have = person.items.map((i) => toks(i.name));
+    const g = person.info && person.info.gender;
+    const wrongGender = g === 'male' ? FEM : g === 'female' ? MASC : null;
     const taken = (it) => {
+      if (wrongGender && wrongGender.test(it.n)) return true;
       const t = toks(it.n);
       if (t.size < 2) return false;
       return have.some((h) => { let k = 0; t.forEach((w) => { if (h.has(w)) k++; }); return k >= Math.max(2, Math.ceil(t.size * 0.6)); });

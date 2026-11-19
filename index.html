@@ -311,20 +311,19 @@ function ideasTab() {
   const p = state.people.find((x) => x.id === ideasFor);
   const r = makeIdeas(p, ideasSeed);
   ideaList = r.list;
-  const mineList = p.id === state.me || p.iManage;
   const shown = r.list.slice(0, ideasShown);
   const price = (it) => (it.hi ? `about $${it.lo}–$${it.hi}` : 'price varies');
-  const opts = [state.people.find((x) => x.id === state.me), ...state.people.filter((x) => x.id !== state.me)]
-    .map((x) => `<option value="${esc(x.id)}" ${x.id === ideasFor ? 'selected' : ''}>${x.id === state.me ? 'Me' : esc(x.name) + (x.isKid ? ' 🧒' : '')}</option>`).join('');
+  // the ideas are for you; parents also get a button for each child they manage
+  const myKids = state.people.filter((x) => x.isKid && x.iManage);
+  const who = myKids.length ? `<div class="tabs" style="margin-bottom:8px"><button class="${p.id === state.me ? 'active' : ''}" data-ideasfor="${esc(state.me)}">Me</button>${myKids.map((k) => `<button class="${p.id === k.id ? 'active' : ''}" data-ideasfor="${esc(k.id)}">🧒 ${esc(k.name)}</button>`).join('')}</div>` : '';
   const cards = shown.map((it, k) => `<div class="item"><div class="main"><div><div class="t">${esc(it.n)}</div><div class="meta">${price(it)} · ${esc(it.lab)}</div></div></div>
-    <div class="btns">${mineList ? `<button class="small on" data-idea-add="${k}">➕ Add to list</button>` : ''}<a class="small" href="${esc(storeUrl(it.n))}" target="_blank" rel="noopener">🔍 Search</a></div></div>`).join('');
+    <div class="btns"><button class="small on" data-idea-add="${k}">➕ Add to list</button><a class="small" href="${esc(storeUrl(it.n))}" target="_blank" rel="noopener">🔍 Search</a></div></div>`).join('');
   const basis = r.basis.length ? `Based on: ${esc(r.basis.join(', '))}.` : 'Nothing to match yet, so these are general ideas. Add interests under “sizes & interests” for better ones.';
-  return `<div class="card"><h2>💡 Gift ideas</h2>
-    <label class="meta">Ideas for</label><select id="ideasfor">${opts}</select>
+  return `<div class="card"><h2>💡 Gift ideas${p.id === state.me ? '' : ` for ${esc(p.name)}`}</h2>${who}
     <div class="meta" style="margin-bottom:8px">${basis} Anything already on their list is left out. Prices are rough estimates and the search link opens your saved store.</div>
     ${cards || '<div class="empty">No ideas to show.</div>'}
     <div class="linkrow" style="margin-top:10px">${shown.length < r.list.length ? `<button class="small" id="ideasmore">Show 20 more</button>` : ''}<button class="small" id="ideasshuffle">🔀 Shuffle</button></div>
-    <div class="meta">Showing ${shown.length} of ${r.list.length}. ${mineList ? 'Add to list copies the name, an estimated price and a store search link into your add form. Then add the picture, size and color.' : `These are ideas for ${esc(p.name)}. They are not claimed on their list.`}</div></div>`;
+    <div class="meta">Showing ${shown.length} of ${r.list.length}. Add to list copies the name, an estimated price and a store search link into the add form. Then add the picture, size and color.${p.info.gender ? '' : ' Tip: set your gender under “sizes &amp; interests” so the ideas fit you better.'}</div></div>`;
 }
 
 // The add/edit form for one item (shared by your own list and the lists of children you manage).
@@ -418,6 +417,8 @@ function aboutForm(me) {
   return `<details class="card" ${filled ? '' : 'open'}><summary><b>👤 ${who} sizes &amp; interests</b></summary>
     <p class="meta">Everyone in the family can see this, to make shopping easier.</p>
     ${INFO.map(([k, label, ph]) => `<label class="meta">${label}</label><input id="info_${k}" placeholder="${ph}" value="${esc(me.info[k] || '')}">`).join('')}
+    <label class="meta">🎁 Gender (only used to pick gift ideas; not shown to others)</label>
+    <select id="info_gender"><option value="">Not set</option><option value="male" ${me.info.gender === 'male' ? 'selected' : ''}>Male</option><option value="female" ${me.info.gender === 'female' ? 'selected' : ''}>Female</option></select>
     <button class="primary" id="saveinfo">Save</button></details>`;
 }
 
@@ -593,13 +594,14 @@ function wire() {
   if ($('#sort')) $('#sort').onchange = (e) => { sortBy = e.target.value; rerender(); };
   if ($('#fpri')) $('#fpri').onchange = (e) => { filterPri = +e.target.value; rerender(); };
   if ($('#hidetaken')) $('#hidetaken').onchange = (e) => { hideTaken = e.target.checked; rerender(); };
-  if ($('#ideasfor')) $('#ideasfor').onchange = (e) => { ideasFor = e.target.value; ideasShown = 20; rerender(); };
+  document.querySelectorAll('[data-ideasfor]').forEach((b) => b.onclick = () => { ideasFor = b.dataset.ideasfor; ideasShown = 20; rerender(); });
   if ($('#ideasmore')) $('#ideasmore').onclick = () => { ideasShown += 20; rerender(); };
   if ($('#ideasshuffle')) $('#ideasshuffle').onclick = () => { ideasSeed++; ideasShown = 20; rerender(); };
   document.querySelectorAll('[data-idea-add]').forEach((b) => b.onclick = () => {
     const it = ideaList[+b.dataset.ideaAdd];
     prefill = { name: it.n, link: storeUrl(it.n), price: it.hi ? String(Math.round((it.lo + it.hi) / 2)) : '', msg: '✅ Idea added. Swap in the exact link and price, add a picture, size or color, then press Add item.' };
     view = ideasFor === state.me ? 'mine' : ideasFor;
+    ideasFor = state.me;
     editing = null;
     renderApp();
     window.scrollTo(0, 0);
@@ -618,6 +620,7 @@ function wire() {
   if (si) si.onclick = () => act(async () => {
     const f = {};
     INFO.forEach(([k]) => { f[k] = $('#info_' + k).value.trim(); });
+    f.gender = $('#info_gender').value || null;
     const r = kidCtx() ? await db.from('kids').update(f).eq('id', kidCtx()) : await db.from('profiles').update(f).eq('id', state.me);
     if (!r.error) alert('Saved!');
     return r;
