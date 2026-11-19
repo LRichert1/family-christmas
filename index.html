@@ -66,7 +66,7 @@ details summary{cursor:pointer;margin-bottom:8px}
 <main id="app"></main>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script src="config.js"></script>
-<script src="ideas.js?v=2"></script>
+<script src="ideas.js?v=3"></script>
 <script src="ideas-1.js?v=1"></script>
 <script src="ideas-2.js?v=1"></script>
 <script src="ideas-3.js?v=1"></script>
@@ -77,7 +77,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':
 const db = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY);
 let state = null, view = 'mine', editing = null, prefill = null;
 let sortBy = 'pri', filterPri = 0, hideTaken = false;
-let ideasFor = null, ideasShown = 20, ideasSeed = 1, ideaList = [];
+let ideasFor = null, ideasShown = 20, ideasSeed = 1, ideaList = [], ideaCache = null;
 const INFO = [['shirt_size', '👕 Shirt', 'e.g. Large'], ['pants_size', '👖 Pants', 'e.g. Large'], ['jeans_size', '👖 Jeans', 'e.g. 32x34'],
   ['shoe_size', '👟 Shoe', 'e.g. 10.5'], ['jewelry_color', '💍 Jewelry color', 'e.g. Gold, silver, rose gold'], ['interests', '⭐ Interests', 'Sports teams, shows, characters…']];
 
@@ -125,6 +125,12 @@ const num = (s) => parseFloat(String(s || '').replace(/[^0-9.]/g, '')) || 0;
 const imgUrl = (p) => db.storage.from('item-images').getPublicUrl(p).data.publicUrl;
 const fixLink = (l) => (/^https?:\/\//.test(l) ? l : 'https://' + l);
 
+function daysLeft() {
+  const now = new Date(), y = now.getFullYear();
+  let xmas = new Date(y, 11, 25);
+  if (now > new Date(y, 11, 26)) xmas = new Date(y + 1, 11, 25);
+  return Math.ceil((xmas - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 864e5);
+}
 function countdown() {
   const now = new Date(), y = now.getFullYear();
   let xmas = new Date(y, 11, 25);
@@ -154,7 +160,7 @@ async function load() {
   const { data: { session } } = await db.auth.getSession();
   if (!session) return renderLogin();
   const me = session.user.id;
-  const [p, i, c, b, f, m, kq, kmq] = await Promise.all([
+  const [p, i, c, b, f, m, kq, kmq, vq, adq] = await Promise.all([
     db.from('profiles').select('*').order('display_name'),
     db.from('items').select('*').order('priority').order('created_at'),
     db.from('claims').select('*'),
@@ -163,7 +169,12 @@ async function load() {
     db.from('memberships').select('*'),
     db.from('kids').select('*').order('name'),
     db.from('kid_managers').select('*'),
+    db.from('idea_votes').select('*'),
+    db.rpc('is_admin'),
   ]);
+  // my thumbs up/down on gift ideas, by who the ideas were for ('me' or a child's id)
+  const votes = {};
+  (vq.error ? [] : vq.data).forEach((x) => ((votes[x.subject] = votes[x.subject] || {})[x.idea] = x.vote));
   const kids = kq.error ? [] : kq.data, kidMgrs = kmq.error ? [] : kmq.data;
   const err = p.error || i.error || c.error || b.error || f.error || m.error;
   if (err) return alert(err.message);
@@ -187,6 +198,8 @@ async function load() {
   kidMgrs.forEach((x) => (mgrsOf[x.kid_id] = mgrsOf[x.kid_id] || []).push(x.user_id));
   state = {
     me,
+    votes,
+    isAdmin: !adq.error && adq.data === true,
     budget: b.data ? Number(b.data.amount) : null,
     families: f.data,
     people: [
@@ -242,16 +255,22 @@ function renderLogin(msg = '') {
 function renderApp() {
   $('#out').hidden = false;
   const others = state.people.filter((p) => p.id !== state.me);
-  if (view !== 'mine' && view !== 'shop' && view !== 'ideas' && !others.find((p) => p.id === view)) view = 'mine';
+  if (view !== 'mine' && view !== 'shop' && view !== 'ideas' && !(view === 'admin' && state.isAdmin) && !others.find((p) => p.id === view)) view = 'mine';
   const tab = (v, label) => `<button class="${view === v ? 'active' : ''}" data-v="${esc(v)}">${label}</button>`;
-  const mineRow = `<div class="tabs">${tab('mine', 'My list')}${tab('ideas', '💡 Ideas')}${tab('shop', '🛍 Shopping')}</div>`;
+  // items I said I would buy and have not bought yet
+  const toBuy = others.reduce((n, p) => n + p.items.filter((i) => i.myClaim && !i.myClaim.bought).length, 0);
+  const days = daysLeft();
+  const reminder = toBuy && days <= 30 && view !== 'shop'
+    ? `<div class="card" style="padding:10px 16px"><b>⏰ ${days === 0 ? 'Christmas is today' : `${days} day${days === 1 ? '' : 's'} left`}</b> · you still have ${toBuy} item${toBuy === 1 ? '' : 's'} to buy. <button class="small" data-goto="shop">See my shopping</button></div>` : '';
+  const mineRow = `<div class="tabs">${tab('mine', 'My list')}${tab('ideas', '💡 Ideas')}${tab('shop', '🛍 Shopping' + (toBuy ? ` (${toBuy})` : ''))}${state.isAdmin ? tab('admin', '🔧 Admin') : ''}</div>`;
   const people = state.families.length > 1
     ? state.families.map((f) => `<div class="famname">${esc(f.name)}</div><div class="tabs">${others.filter((p) => p.famIds.includes(f.id)).map((p) => tab(p.id, esc(p.name) + (p.isKid ? ' 🧒' : ''))).join('') || '<span class="meta">No one else here yet</span>'}</div>`).join('')
     : `<div class="tabs">${others.map((p) => tab(p.id, esc(p.name) + (p.isKid ? ' 🧒' : ''))).join('')}</div>`;
-  const tabs = mineRow + people;
+  const tabs = mineRow + people + reminder;
   const person = others.find((p) => p.id === view);
-  $('#app').innerHTML = tabs + (view === 'mine' ? mine() : view === 'shop' ? shopping() : view === 'ideas' ? ideasTab() : person.iManage ? kidManage(person) : theirs(person));
+  $('#app').innerHTML = tabs + (view === 'mine' ? mine() : view === 'shop' ? shopping() : view === 'ideas' ? ideasTab() : view === 'admin' ? adminTab() : person.iManage ? kidManage(person) : theirs(person));
   document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => { view = b.dataset.v; editing = null; renderApp(); });
+  document.querySelectorAll('[data-goto]').forEach((b) => b.onclick = () => { view = b.dataset.goto; renderApp(); });
   wire();
 }
 
@@ -305,11 +324,26 @@ const storeUrl = (q) => {
   return ({ google: 'https://www.google.com/search?tbm=shop&q=', amazon: 'https://www.amazon.com/s?k=', walmart: 'https://www.walmart.com/search?q=', target: 'https://www.target.com/s?searchTerm=' }[s] || 'https://www.google.com/search?tbm=shop&q=') + encodeURIComponent(q);
 };
 
+// Admin screen (only for the admin account): reset someone's PIN.
+function adminTab() {
+  const adults = state.people.filter((p) => !p.isKid);
+  return `<div class="card"><h2>🔧 Admin: reset a PIN</h2>
+    <label class="meta">Person</label><select id="admuser">${adults.map((p) => `<option value="${esc(p.info.username)}">${esc(p.name)}</option>`).join('')}</select>
+    <input id="admpin" placeholder="New PIN (6+ characters)" autocomplete="off">
+    <button class="primary" id="admreset">Reset PIN</button>
+    <div class="meta">Then tell them the new PIN. Their list and claims stay as they are.</div></div>`;
+}
+
 // Ideas tab: gift ideas from the built-in bank, matched to a person's interests and what is already on their list.
 function ideasTab() {
   if (!state.people.find((p) => p.id === ideasFor)) ideasFor = state.me;
   const p = state.people.find((x) => x.id === ideasFor);
-  const r = makeIdeas(p, ideasSeed);
+  const subject = p.id === state.me ? 'me' : p.kidId;
+  const votes = (state.votes && state.votes[subject]) || {};
+  // the order only changes on Shuffle, a reload or switching person, so cards don't jump when you vote
+  const key = [ideasFor, ideasSeed].join('|');
+  if (!ideaCache || ideaCache.key !== key || ideaCache.state !== state) ideaCache = { key, state, r: makeIdeas(p, ideasSeed, votes) };
+  const r = { ...ideaCache.r, list: ideaCache.r.list.filter((it) => votes[it.n] !== -1) };
   ideaList = r.list;
   const shown = r.list.slice(0, ideasShown);
   const price = (it) => (it.hi ? `about $${it.lo}–$${it.hi}` : 'price varies');
@@ -317,13 +351,14 @@ function ideasTab() {
   const myKids = state.people.filter((x) => x.isKid && x.iManage);
   const who = myKids.length ? `<div class="tabs" style="margin-bottom:8px"><button class="${p.id === state.me ? 'active' : ''}" data-ideasfor="${esc(state.me)}">Me</button>${myKids.map((k) => `<button class="${p.id === k.id ? 'active' : ''}" data-ideasfor="${esc(k.id)}">🧒 ${esc(k.name)}</button>`).join('')}</div>` : '';
   const cards = shown.map((it, k) => `<div class="item"><div class="main"><div><div class="t">${esc(it.n)}</div><div class="meta">${price(it)} · ${esc(it.lab)}</div></div></div>
-    <div class="btns"><button class="small on" data-idea-add="${k}">➕ Add to list</button><a class="small" href="${esc(storeUrl(it.n))}" target="_blank" rel="noopener">🔍 Search</a></div></div>`).join('');
+    <div class="btns"><button class="small on" data-idea-add="${k}">➕ Add to list</button><a class="small" href="${esc(storeUrl(it.n))}" target="_blank" rel="noopener">🔍 Search</a>
+    <span><button class="small ${votes[it.n] === 1 ? 'on' : ''}" data-vote="${k}" data-v="1" title="I like this idea">👍</button> <button class="small" data-vote="${k}" data-v="-1" title="Not for me, hide it">👎</button></span></div></div>`).join('');
   const basis = r.basis.length ? `Based on: ${esc(r.basis.join(', '))}.` : 'Nothing to match yet, so these are general ideas. Add interests under “sizes & interests” for better ones.';
   return `<div class="card"><h2>💡 Gift ideas${p.id === state.me ? '' : ` for ${esc(p.name)}`}</h2>${who}
     <div class="meta" style="margin-bottom:8px">${basis} Anything already on their list is left out. Prices are rough estimates and the search link opens your saved store.</div>
     ${cards || '<div class="empty">No ideas to show.</div>'}
     <div class="linkrow" style="margin-top:10px">${shown.length < r.list.length ? `<button class="small" id="ideasmore">Show 20 more</button>` : ''}<button class="small" id="ideasshuffle">🔀 Shuffle</button></div>
-    <div class="meta">Showing ${shown.length} of ${r.list.length}. Add to list copies the name, an estimated price and a store search link into the add form. Then add the picture, size and color.${p.info.gender ? '' : ' Tip: set your gender under “sizes &amp; interests” so the ideas fit you better.'}</div></div>`;
+    <div class="meta">Showing ${shown.length} of ${r.list.length}. 👍 means more ideas like it next time you shuffle; 👎 hides it for good. Add to list copies the name, an estimated price and a store search link into the add form. Then add the picture, size and color.${p.info.gender ? '' : ' Tip: set your gender under “sizes &amp; interests” so the ideas fit you better.'}</div></div>`;
 }
 
 // The add/edit form for one item (shared by your own list and the lists of children you manage).
@@ -357,7 +392,7 @@ function kidManage(p) {
     ${editing ? '' : `<div class="card"><h2>Add to ${esc(p.name)}'s list</h2>${banner}${itemForm(start)}<button class="primary" id="add">Add item</button></div>`}
     ${editing ? '' : aboutForm(p)}
     <div class="card"><h2>${esc(p.name)}'s list</h2>${p.items.length ? controls(true) : ''}${items || `<div class="empty">${p.items.length ? 'No items match this filter.' : 'Nothing yet — add something above!'}</div>`}
-    ${p.items.length ? `<button class="small del" id="clearall">Clear ${esc(p.name)}'s whole list (new year)</button>` : ''}</div>
+    ${p.items.length ? `<button class="small" id="sharelist">📤 Share ${esc(p.name)}'s list</button> <button class="small del" id="clearall">Clear ${esc(p.name)}'s whole list (new year)</button>` : ''}</div>
     <div class="card"><h2>Manage ${esc(p.name)}</h2>
     <div class="linkrow"><input id="mgr" placeholder="Other parent's username"><button class="small" id="addmgr">Add parent</button></div>
     <div class="meta" style="margin-bottom:10px">They need an account in one of your families. They can then edit ${esc(p.name)}'s list too.</div>
@@ -377,7 +412,7 @@ function mine() {
     ${editing ? '' : aboutForm(me)}
     <div class="card"><h2>My list</h2>${me.items.length ? controls(false) : ''}${items || `<div class="empty">${me.items.length ? 'No items match this filter.' : 'Nothing yet — add something above!'}</div>`}
     <p class="meta">🤫 You can't see what others plan to buy for you.</p>
-    ${me.items.length ? '<button class="small del" id="clearall">Clear my whole list (new year)</button>' : ''}</div>
+    ${me.items.length ? '<button class="small" id="sharelist">📤 Share my list</button> <button class="small del" id="clearall">Clear my whole list (new year)</button>' : ''}</div>
     <div class="card"><h2>My children</h2>
     ${myKids.length ? `<div class="tabs">${myKids.map((k) => `<button data-v="${esc(k.id)}">🧒 ${esc(k.name)}</button>`).join('')}</div>` : `<div class="meta" style="margin-bottom:8px">Add a child to give them their own list. No phone or login needed.</div>`}
     <div class="row"><input id="kidname" placeholder="Child's name"><input id="kidyear" type="number" inputmode="numeric" placeholder="Birth year (optional)"></div>
@@ -594,6 +629,19 @@ function wire() {
   if ($('#sort')) $('#sort').onchange = (e) => { sortBy = e.target.value; rerender(); };
   if ($('#fpri')) $('#fpri').onchange = (e) => { filterPri = +e.target.value; rerender(); };
   if ($('#hidetaken')) $('#hidetaken').onchange = (e) => { hideTaken = e.target.checked; rerender(); };
+  document.querySelectorAll('[data-vote]').forEach((b) => b.onclick = async () => {
+    const it = ideaList[+b.dataset.vote], v = +b.dataset.v;
+    const p = state.people.find((x) => x.id === ideasFor) || state.people.find((x) => x.id === state.me);
+    const subject = p.id === state.me ? 'me' : p.kidId;
+    const mineVotes = (state.votes[subject] = state.votes[subject] || {});
+    const same = mineVotes[it.n] === v;
+    const r = same
+      ? await db.from('idea_votes').delete().eq('subject', subject).eq('idea', it.n)
+      : await db.from('idea_votes').upsert({ user_id: state.me, subject, idea: it.n, vote: v });
+    if (r.error) return alert(r.error.message);
+    if (same) delete mineVotes[it.n]; else mineVotes[it.n] = v;
+    rerender();
+  });
   document.querySelectorAll('[data-ideasfor]').forEach((b) => b.onclick = () => { ideasFor = b.dataset.ideasfor; ideasShown = 20; rerender(); });
   if ($('#ideasmore')) $('#ideasmore').onclick = () => { ideasShown += 20; rerender(); };
   if ($('#ideasshuffle')) $('#ideasshuffle').onclick = () => { ideasSeed++; ideasShown = 20; rerender(); };
@@ -615,6 +663,25 @@ function wire() {
       if (!r.error) alert(`Joined ${r.data}!`);
       return r;
     });
+  };
+  const ar = $('#admreset');
+  if (ar) ar.onclick = async () => {
+    const u = $('#admuser').value, pin = $('#admpin').value;
+    if (pin.length < 6) return alert('The PIN must be at least 6 characters.');
+    if (!confirm(`Reset ${$('#admuser').selectedOptions[0].text}'s PIN?`)) return;
+    const r = await db.rpc('admin_reset_pin', { p_username: u, p_pin: pin });
+    if (r.error) return alert(r.error.message);
+    $('#admpin').value = '';
+    alert(`${r.data}'s PIN is reset. Tell them the new PIN.`);
+  };
+  const sl = $('#sharelist');
+  if (sl) sl.onclick = async () => {
+    const p = cur();
+    const lines = p.items.map((i) => `${i.priority === 1 ? '⭐ ' : '• '}${i.name}${num(i.price) ? ' – $' + String(i.price).replace(/^\$/, '') : ''}${i.notes ? ' (' + i.notes + ')' : ''}${i.link ? '\n   ' + fixLink(i.link) : ''}`);
+    const text = `🎄 ${p.id === state.me ? 'My' : p.name + "'s"} Christmas list\n\n${lines.join('\n')}`;
+    if (navigator.share) { try { await navigator.share({ text }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+    try { await navigator.clipboard.writeText(text); alert('List copied. Paste it into a text message.'); }
+    catch { prompt('Copy your list:', text); }
   };
   const si = $('#saveinfo');
   if (si) si.onclick = () => act(async () => {

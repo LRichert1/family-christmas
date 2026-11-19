@@ -29,7 +29,12 @@
   const MASC = /tie clip|cufflink|beard|shaving|razor|\bmen'?s\b|suspenders|bow tie|necktie|pocket square|cologne|aftershave|barber/i;
 
   // Ideas for one person: matched topics first (mixed together), then general ideas. Skips what is already on their list.
-  window.makeIdeas = (person, seed) => {
+  let byName = null;
+  const nameGroups = () => {
+    if (!byName) { byName = {}; G.forEach((x) => x.items.forEach((it) => (byName[it.n] = byName[it.n] || []).push(x.id))); }
+    return byName;
+  };
+  window.makeIdeas = (person, seed, votes) => {
     const aud = window.audienceOf(person);
     const r = rng(hash(person.id) + seed * 7919);
     const interests = String((person.info && person.info.interests) || '').toLowerCase();
@@ -39,13 +44,18 @@
     const wrongGender = g === 'male' ? FEM : g === 'female' ? MASC : null;
     const taken = (it) => {
       if (wrongGender && wrongGender.test(it.n)) return true;
+      if (votes && votes[it.n] === -1) return true;
       const t = toks(it.n);
       if (t.size < 2) return false;
       return have.some((h) => { let k = 0; t.forEach((w) => { if (h.has(w)) k++; }); return k >= Math.max(2, Math.ceil(t.size * 0.6)); });
     };
     const groups = G.filter((x) => x.aud.includes(aud));
-    const matched = groups.filter((x) => x.kw).map((x) => ({ x, score: 3 * Math.min(count(x.kw, interests), 2) + Math.min(count(x.kw, names), 3) + r() * 0.5 }))
-      .filter((m) => m.score >= 0.5 && Math.floor(m.score) > 0).sort((a, b) => b.score - a.score);
+    // thumbs: each 👍 makes its topic count for more, each 👎 for less; a 👎 idea is never shown
+    const ups = {}, downs = {};
+    Object.entries(votes || {}).forEach(([name, v]) => (nameGroups()[name] || []).forEach((gid) => { const t = v > 0 ? ups : downs; t[gid] = (t[gid] || 0) + 1; }));
+    const matched = groups.filter((x) => x.kw)
+      .map((x) => ({ x, base: 3 * Math.min(count(x.kw, interests), 2) + Math.min(count(x.kw, names), 3) + 2 * Math.min(ups[x.id] || 0, 3) - Math.min(downs[x.id] || 0, 3) }))
+      .filter((m) => m.base > 0).map((m) => ({ x: m.x, score: m.base + r() * 0.5 })).sort((a, b) => b.score - a.score);
     const general = groups.filter((x) => !x.kw);
     const seen = new Set(), out = [];
     const rounds = (lists) => {
